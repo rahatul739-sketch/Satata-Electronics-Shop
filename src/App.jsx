@@ -138,8 +138,16 @@ const dbMap = {
     fromDb: (r) => ({ shopName: r.shop_name, proprietor: r.proprietor, phone: r.phone, address: r.address, currency: r.currency, receiptPolicies: r.receipt_policies || [] }),
   },
   damaged: {
-    toDb: (d) => ({ product_id: d.productId || null, product_name: d.productName, qty: d.qty, reason: d.reason, damage_date: d.date }),
-    fromDb: (r) => ({ id: r.id, productId: r.product_id, productName: r.product_name, qty: r.qty, reason: r.reason, date: r.damage_date }),
+    toDb: (d) => ({
+      product_id: d.productId || null, product_name: d.productName, qty: d.qty, reason: d.reason,
+      damage_date: d.date, entry_type: d.type || 'Inventory Damage',
+      customer_name: d.customerName || null, customer_phone: d.customerPhone || null,
+    }),
+    fromDb: (r) => ({
+      id: r.id, productId: r.product_id, productName: r.product_name, qty: r.qty, reason: r.reason,
+      date: r.damage_date, type: r.entry_type || 'Inventory Damage',
+      customerName: r.customer_name || '', customerPhone: r.customer_phone || '',
+    }),
   },
 };
 
@@ -639,13 +647,20 @@ export default function App() {
         const prod = products.find(p => p.id === parseInt(formData.productId, 10));
         if (!prod) return alert('Please select a valid product.');
         const qty = parseInt(formData.qty, 10) || 1;
+        const entryType = formData.type || 'Inventory Damage';
+        const isInventoryDamage = entryType === 'Inventory Damage';
 
-        // When editing, restore the previously-deducted qty first so the stock check is accurate
-        const availableStock = editingItem && editingItem.productId === prod.id
-          ? prod.stock + (parseInt(editingItem.qty, 10) || 0)
-          : prod.stock;
+        if (entryType === 'After-Sales Service' && (!formData.customerName || !formData.customerPhone)) {
+          return alert('Please enter the customer name and phone number.');
+        }
 
-        if (qty > availableStock) {
+        // When editing, restore any previously-deducted qty first so the stock check is accurate
+        // (only relevant for Inventory Damage entries — After-Sales Service never touched stock)
+        const previouslyDeducted = (editingItem && editingItem.type !== 'After-Sales Service' && editingItem.productId === prod.id)
+          ? (parseInt(editingItem.qty, 10) || 0) : 0;
+        const availableStock = prod.stock + previouslyDeducted;
+
+        if (isInventoryDamage && qty > availableStock) {
           return alert(`Not enough stock for ${prod.name}. Available: ${availableStock}`);
         }
 
@@ -655,9 +670,12 @@ export default function App() {
           qty,
           reason: formData.reason || '',
           date: formData.date || new Date().toISOString().split('T')[0],
+          type: entryType,
+          customerName: entryType === 'After-Sales Service' ? (formData.customerName || '') : '',
+          customerPhone: entryType === 'After-Sales Service' ? (formData.customerPhone || '') : '',
         };
 
-        const newStock = availableStock - qty;
+        const newStock = isInventoryDamage ? availableStock - qty : prod.stock;
 
         if (editingItem) {
           const { error } = await supabase.from('damaged_products').update(dbMap.damaged.toDb(damagedRecord)).eq('id', editingItem.id);
@@ -669,8 +687,10 @@ export default function App() {
           setDamagedProducts([dbMap.damaged.fromDb(data), ...damagedProducts]);
         }
 
-        await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
-        setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        if (isInventoryDamage || previouslyDeducted > 0) {
+          await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
+          setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        }
 
       } else if (activeTab === 'Transactions') {
         if (editingItem) {
@@ -722,9 +742,10 @@ export default function App() {
       }
 
       if (type === 'Damaged') {
-        // Put the damaged quantity back into inventory before removing the log entry.
+        // Put the deducted quantity back into inventory — but only if this entry
+        // actually deducted stock in the first place (Inventory Damage, not After-Sales Service).
         const entryToDelete = damagedProducts.find(d => d.id === id);
-        if (entryToDelete && entryToDelete.productId) {
+        if (entryToDelete && entryToDelete.productId && entryToDelete.type !== 'After-Sales Service') {
           const prod = products.find(p => p.id === entryToDelete.productId);
           if (prod) {
             const restoredStock = prod.stock + (parseInt(entryToDelete.qty, 10) || 0);
@@ -1277,6 +1298,31 @@ export default function App() {
 
                 {activeTab === 'Damaged' && (
                   <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, type: 'Inventory Damage' })}
+                        className={`p-3 rounded-xl text-sm font-bold border transition-all ${
+                          (formData.type || 'Inventory Damage') === 'Inventory Damage'
+                            ? 'bg-orange-500 text-white border-orange-500'
+                            : 'border-[var(--input-border)] text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        Inventory Damage
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, type: 'After-Sales Service' })}
+                        className={`p-3 rounded-xl text-sm font-bold border transition-all ${
+                          formData.type === 'After-Sales Service'
+                            ? 'bg-orange-500 text-white border-orange-500'
+                            : 'border-[var(--input-border)] text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        After-Sales Service
+                      </button>
+                    </div>
+
                     <select
                       required name="productId"
                       defaultValue={formData.productId || ''}
@@ -1289,14 +1335,30 @@ export default function App() {
                       <option value="">Select Product</option>
                       {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
                     </select>
+
+                    {formData.type === 'After-Sales Service' && (
+                      <>
+                        <input
+                          required name="customerName" defaultValue={formData.customerName || ''}
+                          placeholder="Customer Name" onChange={handleInputChange}
+                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                        />
+                        <input
+                          required name="customerPhone" defaultValue={formData.customerPhone || ''}
+                          placeholder="Customer Phone Number" onChange={handleInputChange}
+                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                        />
+                      </>
+                    )}
+
                     <input
                       required name="qty" type="number" min="1" defaultValue={formData.qty || 1}
-                      placeholder="Quantity Damaged" onChange={handleInputChange}
+                      placeholder="Quantity" onChange={handleInputChange}
                       className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                     />
                     <input
                       name="reason" defaultValue={formData.reason || ''}
-                      placeholder="Reason (e.g. dropped, water damage, defective)"
+                      placeholder={formData.type === 'After-Sales Service' ? 'Issue reported (e.g. not turning on)' : 'Reason (e.g. dropped, water damage)'}
                       onChange={handleInputChange}
                       className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                     />
@@ -1306,8 +1368,11 @@ export default function App() {
                       onChange={handleInputChange}
                       className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                     />
+
                     <p className="text-xs text-[var(--text-muted)]">
-                      This will remove the damaged quantity from that product's stock automatically.
+                      {formData.type === 'After-Sales Service'
+                        ? "This won't change your inventory stock — the item was already sold."
+                        : "This will remove the quantity from that product's stock automatically."}
                     </p>
                   </div>
                 )}
