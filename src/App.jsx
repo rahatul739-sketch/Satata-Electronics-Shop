@@ -4,7 +4,8 @@ import {
   ShoppingBag, Home, Box, Layers, Warehouse, 
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
-  Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock
+  Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
+  Wallet, PackagePlus, Tag, BadgePercent
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -121,12 +122,27 @@ const dbMap = {
       id: s.id, customer: s.customer, customer_phone: s.customerPhone, customer_address: s.customerAddress,
       items: s.items, subtotal: s.subtotal, discount: s.discount, total_sell_amount: s.totalSellAmount,
       total_cost_amount: s.totalCostAmount, status: s.status, sale_date: s.date,
+      paid_amount: s.paidAmount !== undefined && s.paidAmount !== null ? s.paidAmount : s.totalSellAmount,
     }),
     fromDb: (r) => ({
       id: r.id, customer: r.customer, customerPhone: r.customer_phone, customerAddress: r.customer_address,
       items: r.items || [], subtotal: Number(r.subtotal), discount: Number(r.discount),
       totalSellAmount: Number(r.total_sell_amount), totalCostAmount: Number(r.total_cost_amount),
       status: r.status, date: r.sale_date,
+      paidAmount: r.paid_amount !== null && r.paid_amount !== undefined ? Number(r.paid_amount) : Number(r.total_sell_amount),
+    }),
+  },
+  purchase: {
+    toDb: (p) => ({
+      id: p.id, supplier: p.supplier, product_id: p.productId || null, product_name: p.productName,
+      category: p.category || '', qty: p.qty, unit_cost: p.unitCost, total_amount: p.totalAmount,
+      paid_amount: p.paidAmount, status: p.status, purchase_date: p.date,
+    }),
+    fromDb: (r) => ({
+      id: r.id, supplier: r.supplier, productId: r.product_id, productName: r.product_name,
+      category: r.category || '', qty: r.qty, unitCost: Number(r.unit_cost), totalAmount: Number(r.total_amount),
+      paidAmount: Number(r.paid_amount), dueAmount: Math.max(0, Number(r.total_amount) - Number(r.paid_amount)),
+      status: r.status, date: r.purchase_date,
     }),
   },
   transaction: {
@@ -303,6 +319,7 @@ export default function App() {
   const [suppliers, setSuppliers] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [damagedProducts, setDamagedProducts] = useState([]);
+  const [purchases, setPurchases] = useState([]);
   const [shopSettings, setShopSettings] = useState(defaultSettings);
 
   useEffect(() => {
@@ -317,7 +334,7 @@ export default function App() {
   const loadAllData = async () => {
     setDataLoading(true);
     try {
-      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes] = await Promise.all([
+      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes, purchaseRes] = await Promise.all([
         supabase.from('categories').select('*').order('id'),
         supabase.from('products').select('*').order('id'),
         supabase.from('customers').select('*').order('id'),
@@ -326,6 +343,7 @@ export default function App() {
         supabase.from('transactions').select('*').order('created_at', { ascending: false }),
         supabase.from('shop_settings').select('*').maybeSingle(),
         supabase.from('damaged_products').select('*').order('created_at', { ascending: false }),
+        supabase.from('purchases').select('*').order('created_at', { ascending: false }),
       ]);
 
       setCategories((catRes.data || []).map(dbMap.category.fromDb));
@@ -335,6 +353,7 @@ export default function App() {
       setSales((saleRes.data || []).map(dbMap.sale.fromDb));
       setTransactions((txnRes.data || []).map(dbMap.transaction.fromDb));
       setDamagedProducts((damagedRes.data || []).map(dbMap.damaged.fromDb));
+      setPurchases((purchaseRes.data || []).map(dbMap.purchase.fromDb));
 
       if (settingsRes.data) {
         setShopSettings({ ...defaultSettings, ...dbMap.settings.fromDb(settingsRes.data) });
@@ -381,10 +400,17 @@ export default function App() {
   const [settingsForm, setSettingsForm] = useState(shopSettings);
   useEffect(() => { setSettingsForm(shopSettings); }, [shopSettings]);
 
-  // POS Cart State
+  // POS Cart State — each row can be narrowed to a category first, then a product.
+  // customProductPrice = the regular/catalog price (editable); customSellPrice = the actual
+  // price the item is sold for (editable). If sell < product price, the difference is the discount.
   const [cartItems, setCartItems] = useState([
-    { productId: '', qty: 1, customSellPrice: 0 }
+    { productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }
   ]);
+
+  // Category-wise browsing: which category is currently selected for filtering the Products list
+  const [productCategoryFilter, setProductCategoryFilter] = useState('');
+  // Due Amounts tab: which side is showing — customer dues or vendor dues
+  const [dueView, setDueView] = useState('customer');
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -412,18 +438,21 @@ export default function App() {
   const handleOpenAdd = () => {
     setEditingItem(null);
     setFormData({});
-    setCartItems([{ productId: '', qty: 1, customSellPrice: 0 }]);
+    setCartItems([{ productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
     setShowModal(true);
   };
 
   const handleOpenEdit = (item) => {
     setEditingItem(item);
-    setFormData({ ...item });
+    const normalizedItem = (activeTab === 'Sales' && item.status === 'Pending') ? { ...item, status: 'Due' } : item;
+    setFormData({ ...normalizedItem });
     if (activeTab === 'Sales' && item.items) {
       setCartItems(item.items.map(i => ({
         productId: i.productId,
         qty: i.qty,
-        customSellPrice: i.sellPrice
+        customSellPrice: i.sellPrice,
+        customProductPrice: i.originalPrice ?? i.sellPrice,
+        categoryFilter: ''
       })));
     }
     setShowModal(true);
@@ -437,13 +466,20 @@ export default function App() {
       const selectedProd = products.find(p => p.id === parseInt(value, 10));
       if (selectedProd) {
         updatedCart[index].customSellPrice = selectedProd.sellPrice;
+        updatedCart[index].customProductPrice = selectedProd.sellPrice;
       }
+    }
+    if (field === 'categoryFilter') {
+      // Switching category clears the previously chosen product for this row
+      updatedCart[index].productId = '';
+      updatedCart[index].customSellPrice = 0;
+      updatedCart[index].customProductPrice = 0;
     }
     setCartItems(updatedCart);
   };
 
   const addCartRow = () => {
-    setCartItems([...cartItems, { productId: '', qty: 1, customSellPrice: 0 }]);
+    setCartItems([...cartItems, { productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
   };
 
   const removeCartRow = (index) => {
@@ -493,6 +529,7 @@ export default function App() {
         const processedItems = [];
         let subtotal = 0;
         let totalCostAmount = 0;
+        let totalLineDiscount = 0;
 
         for (let item of cartItems) {
           const prod = workingProducts.find(p => p.id === parseInt(item.productId, 10));
@@ -503,19 +540,24 @@ export default function App() {
             return alert(`Not enough stock for ${prod.name}. Available: ${prod.stock}`);
           }
 
+          const originalPrice = parseFloat(item.customProductPrice) || prod.sellPrice;
           const customPrice = parseFloat(item.customSellPrice) || prod.sellPrice;
           const lineTotal = customPrice * qty;
           const lineCost = prod.buyPrice * qty;
+          const lineDiscount = Math.max(0, originalPrice - customPrice) * qty;
 
           subtotal += lineTotal;
           totalCostAmount += lineCost;
+          totalLineDiscount += lineDiscount;
 
           processedItems.push({
             productId: prod.id,
             productName: prod.name,
             qty: qty,
             buyPrice: prod.buyPrice,
+            originalPrice: originalPrice,
             sellPrice: customPrice,
+            lineDiscount: lineDiscount,
             lineTotal: lineTotal
           });
         }
@@ -523,6 +565,12 @@ export default function App() {
         const discount = parseFloat(formData.discount) || 0;
         const totalSellAmount = subtotal - discount;
         const orderId = editingItem ? editingItem.id : `#ORD-${Math.floor(1000 + Math.random() * 9000)}`;
+
+        const saleStatus = formData.status || 'Paid';
+        let paidAmount;
+        if (saleStatus === 'Paid') paidAmount = totalSellAmount;
+        else if (saleStatus === 'Due') paidAmount = 0;
+        else paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalSellAmount); // Partial
 
         const saleRecord = {
           id: orderId,
@@ -534,7 +582,8 @@ export default function App() {
           discount: discount,
           totalSellAmount: totalSellAmount,
           totalCostAmount: totalCostAmount,
-          status: formData.status || 'Paid',
+          status: saleStatus,
+          paidAmount: paidAmount,
           date: formData.date || new Date().toISOString().split('T')[0]
         };
 
@@ -692,6 +741,43 @@ export default function App() {
           setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
         }
 
+      } else if (activeTab === 'Purchases') {
+        const prod = formData.productId ? products.find(p => p.id === parseInt(formData.productId, 10)) : null;
+        if (!formData.supplier) return alert('Please select or enter a supplier.');
+        const qty = parseInt(formData.qty, 10) || 1;
+        const unitCost = parseFloat(formData.unitCost) || 0;
+        const totalAmount = parseFloat(formData.totalAmount) || (unitCost * qty);
+        const paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalAmount);
+        const status = paidAmount <= 0 ? 'Due' : paidAmount >= totalAmount ? 'Paid' : 'Partial';
+        const purchaseId = editingItem ? editingItem.id : `#PUR-${Math.floor(1000 + Math.random() * 9000)}`;
+
+        const purchaseRecord = {
+          id: purchaseId,
+          supplier: formData.supplier,
+          productId: prod ? prod.id : null,
+          productName: prod ? prod.name : (formData.productName || ''),
+          category: prod ? prod.category : (formData.category || ''),
+          qty, unitCost, totalAmount, paidAmount, status,
+          date: formData.date || new Date().toISOString().split('T')[0],
+        };
+
+        if (editingItem) {
+          const { error } = await supabase.from('purchases').update(dbMap.purchase.toDb(purchaseRecord)).eq('id', editingItem.id);
+          if (error) throw error;
+          setPurchases(purchases.map(p => p.id === editingItem.id ? { ...purchaseRecord, dueAmount: Math.max(0, totalAmount - paidAmount) } : p));
+        } else {
+          const { error } = await supabase.from('purchases').insert(dbMap.purchase.toDb(purchaseRecord));
+          if (error) throw error;
+          setPurchases([{ ...purchaseRecord, dueAmount: Math.max(0, totalAmount - paidAmount) }, ...purchases]);
+        }
+
+        // Optional: add the purchased quantity straight into stock (restocking)
+        if (formData.addToStock && prod) {
+          const newStock = prod.stock + qty;
+          await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
+          setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        }
+
       } else if (activeTab === 'Transactions') {
         if (editingItem) {
           const updated = { ...editingItem, ...formData, amount: parseFloat(formData.amount) };
@@ -721,7 +807,7 @@ export default function App() {
   const handleDelete = async (id, type) => {
     if (!window.confirm("Are you sure you want to delete this record?")) return;
     try {
-      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Damaged: 'damaged_products' };
+      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases' };
 
       if (type === 'Sales') {
         // Put the sold quantities back into inventory before removing the sale record.
@@ -771,6 +857,7 @@ export default function App() {
       if (type === 'Suppliers') setSuppliers(suppliers.filter(s => s.id !== id));
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
       if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
+      if (type === 'Purchases') setPurchases(purchases.filter(p => p.id !== id));
     } catch (err) {
       alert('Could not delete — ' + (err.message || 'please check your internet connection and try again.'));
     }
@@ -935,12 +1022,39 @@ export default function App() {
   const lowStockProducts = products.filter(p => p.stock <= (p.reorderLevel || 5));
 
   // Safe lookup map used by the generic tables instead of eval()
-  const genericDataMap = { categories, customers, suppliers, transactions, damaged: damagedProducts };
+  const genericDataMap = { categories, customers, suppliers, transactions, damaged: damagedProducts, purchases };
+
+  // --- Due Amounts: customer dues come from sales that aren't fully paid,
+  // vendor dues come from purchases that aren't fully paid to the supplier. ---
+  const customerDues = sales
+    .map(s => ({ ...s, dueAmount: Math.max(0, s.totalSellAmount - (s.paidAmount ?? (s.status === 'Paid' ? s.totalSellAmount : 0))) }))
+    .filter(s => s.dueAmount > 0)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const totalCustomerDue = customerDues.reduce((sum, s) => sum + s.dueAmount, 0);
+
+  const vendorDues = purchases
+    .map(p => ({ ...p, dueAmount: p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount) }))
+    .filter(p => p.dueAmount > 0)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const totalVendorDue = vendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
 
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
-    !currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch)
+    (!currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch)) &&
+    (!productCategoryFilter || p.category === productCategoryFilter)
   );
+  const filteredPurchases = (purchases || []).filter(p =>
+    !currentSearch ||
+    (p.id || '').toLowerCase().includes(currentSearch) ||
+    (p.supplier || '').toLowerCase().includes(currentSearch) ||
+    (p.productName || '').toLowerCase().includes(currentSearch)
+  );
+  // Products grouped by category, for the category-wise browsing view
+  const productsByCategory = filteredProducts.reduce((acc, p) => {
+    const key = p.category || 'Uncategorized';
+    (acc[key] = acc[key] || []).push(p);
+    return acc;
+  }, {});
   const filteredSales = sales.filter(s =>
     !currentSearch ||
     s.id.toLowerCase().includes(currentSearch) ||
@@ -967,9 +1081,11 @@ export default function App() {
   const navItems = [
     { name: 'Dashboard', icon: Home }, { name: 'Products', icon: Box },
     { name: 'Categories', icon: Layers }, { name: 'Inventory', icon: Warehouse },
-    { name: 'Sales', icon: ShoppingCart }, { name: 'Damaged', icon: AlertTriangle },
+    { name: 'Sales', icon: ShoppingCart }, { name: 'Purchases', icon: PackagePlus },
+    { name: 'Damaged', icon: AlertTriangle },
     { name: 'Customers', icon: Users },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
+    { name: 'Due Amounts', icon: Wallet },
     { name: 'Reports', icon: PieChart }, { name: 'Settings', icon: Settings }
   ];
 
@@ -1126,7 +1242,20 @@ export default function App() {
             <p className="text-xs text-[var(--text-muted)] font-medium">{shopSettings.shopName} Management System</p>
           </div>
           <div className="flex items-center gap-3">
-            {['Products', 'Categories', 'Sales', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {activeTab === 'Products' && (
+              <div className="relative">
+                <Tag className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                <select
+                  value={productCategoryFilter}
+                  onChange={(e) => setProductCategoryFilter(e.target.value)}
+                  className="pl-9 pr-8 py-2.5 rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 transition-all appearance-none"
+                >
+                  <option value="">All Categories</option>
+                  {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -1137,7 +1266,7 @@ export default function App() {
                 />
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
               <button 
                 onClick={handleOpenAdd}
                 className="bg-orange-500 text-white text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-600 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5"
@@ -1219,55 +1348,100 @@ export default function App() {
                     </div>
                     <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     
-                    <div className="space-y-3 max-h-56 overflow-y-auto pr-1">
+                    <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
                       <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
-                      {cartItems.map((item, idx) => (
-                        <div key={idx} className="flex gap-2 items-center bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)]">
-                          <select 
-                            required 
-                            value={item.productId}
-                            onChange={(e) => handleCartChange(idx, 'productId', e.target.value)} 
-                            className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
-                          >
-                            <option value="">Select Product...</option>
-                            {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
-                          </select>
-                          <input 
-                            required 
-                            type="number" 
-                            placeholder="Qty" 
-                            value={item.qty} 
-                            min="1"
-                            onChange={(e) => handleCartChange(idx, 'qty', e.target.value)} 
-                            className="w-16 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400" 
-                          />
-                          <input 
-                            required 
-                            type="number" 
-                            step="0.01"
-                            placeholder="Sell Price" 
-                            value={item.customSellPrice} 
-                            onChange={(e) => handleCartChange(idx, 'customSellPrice', e.target.value)} 
-                            className="w-28 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
-                          />
-                          {cartItems.length > 1 && (
-                            <button type="button" onClick={() => removeCartRow(idx)} className="text-red-500 hover:text-red-700 p-1">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
+                      {cartItems.map((item, idx) => {
+                        const rowProducts = item.categoryFilter ? products.filter(p => p.category === item.categoryFilter) : products;
+                        const lineDiscount = Math.max(0, (parseFloat(item.customProductPrice) || 0) - (parseFloat(item.customSellPrice) || 0));
+                        return (
+                        <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
+                          <div className="flex gap-2 items-center">
+                            <select
+                              value={item.categoryFilter}
+                              onChange={(e) => handleCartChange(idx, 'categoryFilter', e.target.value)}
+                              title="Filter by category"
+                              className="w-32 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                            >
+                              <option value="">All Categories</option>
+                              {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                            </select>
+                            <select 
+                              required 
+                              value={item.productId}
+                              onChange={(e) => handleCartChange(idx, 'productId', e.target.value)} 
+                              className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                            >
+                              <option value="">Select Product...</option>
+                              {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                            </select>
+                            <input 
+                              required 
+                              type="number" 
+                              placeholder="Qty" 
+                              value={item.qty} 
+                              min="1"
+                              onChange={(e) => handleCartChange(idx, 'qty', e.target.value)} 
+                              className="w-16 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                            />
+                            {cartItems.length > 1 && (
+                              <button type="button" onClick={() => removeCartRow(idx)} className="text-red-500 hover:text-red-700 p-1">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                          <div className="flex gap-2 items-center pl-1">
+                            <div className="flex-1">
+                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Product Price</label>
+                              <input 
+                                required 
+                                type="number" 
+                                step="0.01"
+                                placeholder="Product Price" 
+                                value={item.customProductPrice} 
+                                onChange={(e) => handleCartChange(idx, 'customProductPrice', e.target.value)} 
+                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                              />
+                            </div>
+                            <div className="flex-1">
+                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Sell Price</label>
+                              <input 
+                                required 
+                                type="number" 
+                                step="0.01"
+                                placeholder="Sell Price" 
+                                value={item.customSellPrice} 
+                                onChange={(e) => handleCartChange(idx, 'customSellPrice', e.target.value)} 
+                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                              />
+                            </div>
+                            {lineDiscount > 0 && (
+                              <span className="shrink-0 self-end mb-1.5 inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold px-2 py-1 rounded-lg">
+                                <BadgePercent className="w-3 h-3" /> Tk {lineDiscount.toLocaleString()} off
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     <button type="button" onClick={addCartRow} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline pt-1">
                       <Plus className="w-4 h-4" /> Add Another Item
                     </button>
                     <div className="flex gap-4 pt-2">
-                      <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Extra Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                       <select name="status" defaultValue={formData.status || 'Paid'} onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
-                        <option value="Paid">Paid</option>
-                        <option value="Pending">Pending</option>
+                        <option value="Paid">Paid in Full</option>
+                        <option value="Partial">Partially Paid (Half Due)</option>
+                        <option value="Due">Fully Due / Pending</option>
                       </select>
                     </div>
+                    {formData.status === 'Partial' && (
+                      <input
+                        name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''}
+                        placeholder="Amount Paid Now (Tk)" onChange={handleInputChange}
+                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
+                    )}
                   </>
                 )}
 
@@ -1293,6 +1467,66 @@ export default function App() {
                     <input required name="contact" defaultValue={formData.contact || ''} placeholder="Contact Person" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="email" defaultValue={formData.email || ''} placeholder="Email Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="phone" defaultValue={formData.phone || ''} placeholder="Phone Number" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                  </>
+                )}
+
+                {activeTab === 'Purchases' && (
+                  <>
+                    <input
+                      required list="supplier-list" name="supplier" defaultValue={formData.supplier || ''}
+                      placeholder="Supplier / Vendor Name" onChange={handleInputChange}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                    <datalist id="supplier-list">
+                      {suppliers.map(s => <option key={s.id} value={s.company} />)}
+                    </datalist>
+
+                    <select
+                      name="productId" defaultValue={formData.productId || ''}
+                      onChange={(e) => {
+                        const selected = products.find(p => p.id === parseInt(e.target.value, 10));
+                        setFormData({ ...formData, productId: e.target.value, productName: selected ? selected.name : '', category: selected ? selected.category : formData.category });
+                      }}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    >
+                      <option value="">Select Product (optional)</option>
+                      {categories.map(cat => (
+                        <optgroup key={cat.id} label={cat.name}>
+                          {products.filter(p => p.category === cat.name).map(p => (
+                            <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                    {!formData.productId && (
+                      <input
+                        name="productName" defaultValue={formData.productName || ''}
+                        placeholder="Item description (if not in your Products list)" onChange={handleInputChange}
+                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
+                    )}
+
+                    <div className="flex gap-4">
+                      <input required name="qty" type="number" min="1" defaultValue={formData.qty || 1} placeholder="Quantity" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <input required name="unitCost" type="number" step="0.01" defaultValue={formData.unitCost || ''} placeholder="Unit Cost (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    </div>
+                    <div className="flex gap-4">
+                      <input name="totalAmount" type="number" step="0.01" defaultValue={formData.totalAmount || ''} placeholder="Total Amount (Tk) — auto if blank" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <input name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''} placeholder="Amount Paid Now (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    </div>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      Leave "Amount Paid Now" blank or 0 for a fully due purchase, equal to the total for fully paid, or anything in between for a partial/half-due payment. The remaining due amount will show on the Due Amounts page under this supplier.
+                    </p>
+                    <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
+                      <input type="checkbox" name="addToStock" defaultChecked={!!formData.addToStock} onChange={(e) => setFormData({ ...formData, addToStock: e.target.checked })} className="w-4 h-4 accent-orange-500" />
+                      Add this quantity to product stock
+                    </label>
+                    <input
+                      required name="date" type="date"
+                      defaultValue={formData.date || new Date().toISOString().split('T')[0]}
+                      onChange={handleInputChange}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
                   </>
                 )}
 
@@ -1441,6 +1675,17 @@ export default function App() {
                 <div className="flex justify-between text-sm font-black pt-1.5 mt-1 border-t border-slate-300">
                   <span>TOTAL</span><span>Tk {selectedReceipt.totalSellAmount.toLocaleString()}</span>
                 </div>
+                {(() => {
+                  const paid = selectedReceipt.paidAmount ?? (selectedReceipt.status === 'Paid' ? selectedReceipt.totalSellAmount : 0);
+                  const due = Math.max(0, selectedReceipt.totalSellAmount - paid);
+                  if (due <= 0) return null;
+                  return (
+                    <>
+                      <div className="flex justify-between"><span>Paid</span><span>Tk {paid.toLocaleString()}</span></div>
+                      <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>
+                    </>
+                  );
+                })()}
               </div>
 
               {(shopSettings.receiptPolicies && shopSettings.receiptPolicies.filter(Boolean).length > 0) && (
@@ -1581,26 +1826,35 @@ export default function App() {
                   <th className="pb-3 text-right">ACTION</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[var(--border-card)]">
-                {filteredProducts.map(p => (
-                  <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                    <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">Tk {p.buyPrice.toLocaleString()}</td>
-                    <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.sellPrice.toLocaleString()}</td>
-                    <td className="py-4">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-100 text-emerald-800'}`}>
-                        {p.stock} units {p.stock <= p.reorderLevel && '⚠️'}
+              {Object.keys(productsByCategory).sort().map(catName => (
+                <tbody key={catName} className="divide-y divide-[var(--border-card)]">
+                  <tr>
+                    <td colSpan={7} className="pt-5 pb-2">
+                      <span className="inline-flex items-center gap-1.5 text-orange-600 font-black text-xs uppercase tracking-wide">
+                        <Tag className="w-3.5 h-3.5" /> {catName} <span className="text-[var(--text-muted)] font-semibold normal-case">({productsByCategory[catName].length})</span>
                       </span>
                     </td>
-                    <td className="py-4 font-black text-[var(--text-primary)]">Tk {(p.buyPrice * p.stock).toLocaleString()}</td>
-                    <td className="py-4 text-right flex justify-end gap-1">
-                      <button onClick={() => handleOpenEdit(p)} title="Edit Product" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
-                      <button onClick={() => handleDelete(p.id, 'Products')} title="Delete Product" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
-                    </td>
                   </tr>
-                ))}
-              </tbody>
+                  {productsByCategory[catName].map(p => (
+                    <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                      <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
+                      <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
+                      <td className="py-4 text-[var(--text-secondary)]">Tk {p.buyPrice.toLocaleString()}</td>
+                      <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.sellPrice.toLocaleString()}</td>
+                      <td className="py-4">
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-100 text-emerald-800'}`}>
+                          {p.stock} units {p.stock <= p.reorderLevel && '⚠️'}
+                        </span>
+                      </td>
+                      <td className="py-4 font-black text-[var(--text-primary)]">Tk {(p.buyPrice * p.stock).toLocaleString()}</td>
+                      <td className="py-4 text-right flex justify-end gap-1">
+                        <button onClick={() => handleOpenEdit(p)} title="Edit Product" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                        <button onClick={() => handleDelete(p.id, 'Products')} title="Delete Product" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              ))}
             </table>
             )}
           </div>
@@ -1661,16 +1915,28 @@ export default function App() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                  <th className="pb-3">ORDER ID</th><th className="pb-3">CUSTOMER</th><th className="pb-3">ITEMS</th><th className="pb-3">TOTAL AMOUNT</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                  <th className="pb-3">ORDER ID</th><th className="pb-3">CUSTOMER</th><th className="pb-3">ITEMS</th><th className="pb-3">TOTAL AMOUNT</th><th className="pb-3">PAYMENT</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-card)]">
-                {filteredSales.map(s => (
+                {filteredSales.map(s => {
+                  const paid = s.paidAmount ?? (s.status === 'Paid' ? s.totalSellAmount : 0);
+                  const due = Math.max(0, s.totalSellAmount - paid);
+                  return (
                   <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                     <td className="py-4 font-bold text-orange-600">{s.id}</td>
                     <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
                     <td className="py-4 text-[var(--text-secondary)]">{s.items.length} item(s)</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
+                    <td className="py-4">
+                      {due <= 0 ? (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${paid.toLocaleString()}`}>
+                          Due Tk {due.toLocaleString()}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
                     <td className="py-4 text-right flex justify-end gap-1">
                       <button onClick={() => setSelectedReceipt(s)} title="View & Print Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
@@ -1678,10 +1944,148 @@ export default function App() {
                       <button onClick={() => handleDelete(s.id, 'Sales')} title="Delete Sale" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
             )}
+          </div>
+        )}
+
+        {/* PURCHASES TAB — what you've bought from suppliers, and what you still owe them */}
+        {activeTab === 'Purchases' && (
+          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+            {filteredPurchases.length === 0 ? (
+              <EmptyState
+                icon={purchases.length === 0 ? PackagePlus : PackageSearch}
+                title={purchases.length === 0 ? 'No purchases yet' : 'No matching purchases'}
+                message={purchases.length === 0 ? "Click 'Add New Purchase' to record what you bought from a supplier." : 'Try a different search term.'}
+              />
+            ) : (
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                  <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">QTY</th><th className="pb-3">TOTAL</th><th className="pb-3">PAYMENT</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border-card)]">
+                {filteredPurchases.map(p => {
+                  const due = p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount);
+                  return (
+                  <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                    <td className="py-4 font-bold text-orange-600">{p.id}</td>
+                    <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
+                    <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
+                    <td className="py-4 text-[var(--text-secondary)]">{p.qty}</td>
+                    <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.totalAmount.toLocaleString()}</td>
+                    <td className="py-4">
+                      {due <= 0 ? (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${p.paidAmount.toLocaleString()}`}>
+                          Due Tk {due.toLocaleString()}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
+                    <td className="py-4 text-right flex justify-end gap-1">
+                      <button onClick={() => handleOpenEdit(p)} title="Edit Purchase" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                      <button onClick={() => handleDelete(p.id, 'Purchases')} title="Delete Purchase" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                    </td>
+                  </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            )}
+          </div>
+        )}
+
+        {/* DUE AMOUNTS TAB — customers who owe you, and suppliers you owe */}
+        {activeTab === 'Due Amounts' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <button
+                onClick={() => setDueView('customer')}
+                className={`text-left p-6 rounded-2xl border shadow-sm transition-colors ${dueView === 'customer' ? 'bg-orange-500 border-orange-500 text-white' : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-primary)]'}`}
+              >
+                <p className={`text-sm font-semibold mb-1 ${dueView === 'customer' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>Customers Owe You</p>
+                <p className="text-2xl font-black">Tk {totalCustomerDue.toLocaleString()}</p>
+                <p className={`text-xs mt-1 ${dueView === 'customer' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>{customerDues.length} pending sale{customerDues.length !== 1 ? 's' : ''}</p>
+              </button>
+              <button
+                onClick={() => setDueView('vendor')}
+                className={`text-left p-6 rounded-2xl border shadow-sm transition-colors ${dueView === 'vendor' ? 'bg-orange-500 border-orange-500 text-white' : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-primary)]'}`}
+              >
+                <p className={`text-sm font-semibold mb-1 ${dueView === 'vendor' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>You Owe Suppliers</p>
+                <p className="text-2xl font-black">Tk {totalVendorDue.toLocaleString()}</p>
+                <p className={`text-xs mt-1 ${dueView === 'vendor' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>{vendorDues.length} pending purchase{vendorDues.length !== 1 ? 's' : ''}</p>
+              </button>
+            </div>
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              {dueView === 'customer' ? (
+                customerDues.length === 0 ? (
+                  <EmptyState icon={Wallet} title="No customer dues" message="Every sale is fully paid — nice work!" />
+                ) : (
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                        <th className="pb-3">ORDER ID</th><th className="pb-3">CUSTOMER</th><th className="pb-3">PHONE</th><th className="pb-3">TOTAL</th><th className="pb-3">PAID</th><th className="pb-3">DUE</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-card)]">
+                      {customerDues.map(s => {
+                        const paid = s.paidAmount ?? 0;
+                        return (
+                          <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                            <td className="py-4 font-bold text-orange-600">{s.id}</td>
+                            <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
+                            <td className="py-4 text-[var(--text-secondary)]">{s.customerPhone || '—'}</td>
+                            <td className="py-4 text-[var(--text-secondary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
+                            <td className="py-4 text-emerald-700">Tk {paid.toLocaleString()}</td>
+                            <td className="py-4 font-black text-red-600">Tk {s.dueAmount.toLocaleString()}</td>
+                            <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
+                            <td className="py-4 text-right flex justify-end gap-1">
+                              <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                              <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )
+              ) : (
+                vendorDues.length === 0 ? (
+                  <EmptyState icon={Wallet} title="No vendor dues" message="You're all settled up with your suppliers." />
+                ) : (
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                        <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">TOTAL</th><th className="pb-3">PAID</th><th className="pb-3">DUE</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-card)]">
+                      {vendorDues.map(p => (
+                        <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                          <td className="py-4 font-bold text-orange-600">{p.id}</td>
+                          <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
+                          <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
+                          <td className="py-4 text-[var(--text-secondary)]">Tk {p.totalAmount.toLocaleString()}</td>
+                          <td className="py-4 text-emerald-700">Tk {p.paidAmount.toLocaleString()}</td>
+                          <td className="py-4 font-black text-red-600">Tk {p.dueAmount.toLocaleString()}</td>
+                          <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
+                          <td className="py-4 text-right flex justify-end gap-1">
+                            <button onClick={() => { setActiveTab('Purchases'); handleOpenEdit(p); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+              )}
+            </div>
           </div>
         )}
 
