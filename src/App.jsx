@@ -905,13 +905,13 @@ export default function App() {
           ));
         }
 
-        // Add whatever quantity actually arrived straight into stock (restocking) — only
-        // for brand-new purchases, and only the receivedQty of each item (not the full
-        // ordered qty), so an item the vendor only part-shipped doesn't overcredit stock.
-        // Later batches of the same purchase are received from the Advance Payments page
-        // instead, which applies its own stock delta — this keeps stock changes from ever
-        // double-counting on a subsequent edit of this purchase.
-        if (!editingItem && formData.addToStock) {
+        // Whatever quantity actually arrived goes straight into stock, automatically —
+        // only for brand-new purchases, and only the receivedQty of each item (not the
+        // full ordered qty), so an item the vendor only part-shipped doesn't overcredit
+        // stock. Later batches of the same purchase are received from the Advance
+        // Payments page instead, which applies its own stock delta — this keeps stock
+        // changes from ever double-counting on a subsequent edit of this purchase.
+        if (!editingItem) {
           const deltaByProduct = {};
           processedItems.forEach(i => {
             if (i.productId && i.receivedQty > 0) {
@@ -982,7 +982,7 @@ export default function App() {
 
       if (item.productId) {
         const prod = products.find(pr => pr.id === item.productId);
-        if (prod && window.confirm(`Add ${receiveNow} unit(s) of "${item.productName}" to stock now that it's arrived?`)) {
+        if (prod) {
           const newStock = prod.stock + receiveNow;
           const { error: stockError } = await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
           if (stockError) throw stockError;
@@ -1820,14 +1820,13 @@ export default function App() {
                       Leave "Amount Paid Now" blank or 0 for a fully due purchase, equal to the total for fully paid, or anything in between for a partial/half-due payment. The remaining due amount will show on the Due Amounts page under this supplier.
                     </p>
                     {!editingItem && (
-                      <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
-                        <input type="checkbox" name="addToStock" checked={!!formData.addToStock} onChange={(e) => setFormData({ ...formData, addToStock: e.target.checked })} className="w-4 h-4 accent-orange-500" />
-                        Add received quantities to product stock now
-                      </label>
+                      <p className="text-xs text-[var(--text-muted)] bg-[var(--bg-hover)] rounded-xl p-3">
+                        Whatever "Received Qty Now" you enter above is added to that product's stock automatically when you save — no extra step needed.
+                      </p>
                     )}
                     {editingItem && (
                       <p className="text-xs text-[var(--text-muted)] bg-[var(--bg-hover)] rounded-xl p-3">
-                        To receive more of a pending item later, use "Mark as Received" on the Advance Payments page — that keeps stock counts from being added twice.
+                        To receive more of a pending item later, use "Mark as Received" on the Advance Payments page — that adds it to stock automatically and keeps counts from being added twice.
                       </p>
                     )}
                     <input
