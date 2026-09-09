@@ -430,6 +430,9 @@ export default function App() {
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [selectedPurchaseReceipt, setSelectedPurchaseReceipt] = useState(null);
   const [formData, setFormData] = useState({});
+  // Styled "Mark as Received" modal state — replaces the old window.prompt() flow
+  const [receiveModal, setReceiveModal] = useState(null); // { purchase, itemIndex, item, pendingQty }
+  const [receiveQtyInput, setReceiveQtyInput] = useState('');
 
   // Settings Form State — kept in sync with shopSettings once it loads from Supabase
   const [settingsForm, setSettingsForm] = useState(shopSettings);
@@ -958,15 +961,22 @@ export default function App() {
   // Receive some or all of the still-pending quantity for one line item of a purchase.
   // Vendors often deliver in batches, so this asks how many units just arrived (defaulting
   // to the full pending amount) rather than assuming the whole order showed up at once.
-  const handleReceivePurchaseItem = async (purchase, itemIndex) => {
+  const handleReceivePurchaseItem = (purchase, itemIndex) => {
     const item = purchase.items[itemIndex];
     if (!item) return;
     const pendingQty = item.qty - (item.receivedQty || 0);
     if (pendingQty <= 0) return;
 
-    const input = window.prompt(`How many units of "${item.productName}" just arrived? (Pending: ${pendingQty})`, pendingQty);
-    if (input === null) return;
-    let receiveNow = parseInt(input, 10);
+    setReceiveModal({ purchase, itemIndex, item, pendingQty });
+    setReceiveQtyInput(String(pendingQty));
+  };
+
+  const submitReceivePurchaseItem = async (e) => {
+    e.preventDefault();
+    if (!receiveModal) return;
+    const { purchase, itemIndex, item, pendingQty } = receiveModal;
+
+    let receiveNow = parseInt(receiveQtyInput, 10);
     if (isNaN(receiveNow) || receiveNow <= 0) return alert('Enter a valid quantity greater than 0.');
     if (receiveNow > pendingQty) receiveNow = pendingQty;
 
@@ -989,6 +999,8 @@ export default function App() {
           setProducts(prev => prev.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
         }
       }
+      setReceiveModal(null);
+      setReceiveQtyInput('');
     } catch (err) {
       alert('Could not update — ' + (err.message || 'please check your internet connection and try again.'));
     }
@@ -1931,6 +1943,46 @@ export default function App() {
 
                 <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
                   <button type="button" onClick={() => setShowModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save Changes</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* MARK AS RECEIVED MODAL — styled to match the Add New Purchase modal instead of a native browser prompt */}
+        {receiveModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[440px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Mark as Received</h3>
+                <button onClick={() => { setReceiveModal(null); setReceiveQtyInput(''); }} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+
+              <form onSubmit={submitReceivePurchaseItem} className="space-y-4 text-sm">
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4 border border-[var(--border-card)]">
+                  <p className="text-[var(--text-muted)] text-xs font-bold uppercase tracking-wide mb-1">Item</p>
+                  <p className="text-[var(--text-primary)] font-bold">{receiveModal.item.productName || '—'}</p>
+                  <p className="text-[var(--text-secondary)] text-xs mt-1">Pending: {receiveModal.pendingQty} of {receiveModal.item.qty} · Purchase {receiveModal.purchase.id}</p>
+                </div>
+
+                <div>
+                  <label className="block text-[var(--text-secondary)] font-semibold mb-1.5">How many units just arrived?</label>
+                  <input
+                    required
+                    autoFocus
+                    type="number"
+                    min="1"
+                    max={receiveModal.pendingQty}
+                    value={receiveQtyInput}
+                    onChange={(e) => setReceiveQtyInput(e.target.value)}
+                    className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                  />
+                  <p className="text-[var(--text-muted)] text-xs mt-1.5">Leave lower than {receiveModal.pendingQty} if the vendor only sent part of it. This is added to stock automatically.</p>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => { setReceiveModal(null); setReceiveQtyInput(''); }} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
                   <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save Changes</button>
                 </div>
               </form>
