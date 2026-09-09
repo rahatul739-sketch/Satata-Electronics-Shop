@@ -5,7 +5,7 @@ import {
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
-  Wallet, PackagePlus, Tag, BadgePercent
+  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -136,13 +136,13 @@ const dbMap = {
     toDb: (p) => ({
       id: p.id, supplier: p.supplier, product_id: p.productId || null, product_name: p.productName,
       category: p.category || '', qty: p.qty, unit_cost: p.unitCost, total_amount: p.totalAmount,
-      paid_amount: p.paidAmount, status: p.status, purchase_date: p.date,
+      paid_amount: p.paidAmount, status: p.status, purchase_date: p.date, received: p.received !== false,
     }),
     fromDb: (r) => ({
       id: r.id, supplier: r.supplier, productId: r.product_id, productName: r.product_name,
       category: r.category || '', qty: r.qty, unitCost: Number(r.unit_cost), totalAmount: Number(r.total_amount),
       paidAmount: Number(r.paid_amount), dueAmount: Math.max(0, Number(r.total_amount) - Number(r.paid_amount)),
-      status: r.status, date: r.purchase_date,
+      status: r.status, date: r.purchase_date, received: r.received !== false,
     }),
   },
   transaction: {
@@ -394,6 +394,7 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   const [selectedReceipt, setSelectedReceipt] = useState(null);
+  const [selectedPurchaseReceipt, setSelectedPurchaseReceipt] = useState(null);
   const [formData, setFormData] = useState({});
 
   // Settings Form State — kept in sync with shopSettings once it loads from Supabase
@@ -743,13 +744,24 @@ export default function App() {
 
       } else if (activeTab === 'Purchases') {
         const prod = formData.productId ? products.find(p => p.id === parseInt(formData.productId, 10)) : null;
-        if (!formData.supplier) return alert('Please select or enter a supplier.');
+        if (!formData.supplier) return alert('Please select a supplier.');
         const qty = parseInt(formData.qty, 10) || 1;
         const unitCost = parseFloat(formData.unitCost) || 0;
-        const totalAmount = parseFloat(formData.totalAmount) || (unitCost * qty);
+        let totalAmount = parseFloat(formData.totalAmount) || (unitCost * qty);
+
+        // If the user opted to roll a previous outstanding balance from this same
+        // supplier into this purchase, fold it into the total and settle the old entries.
+        const priorDuePurchases = purchases.filter(p => p.supplier === formData.supplier && p.id !== editingItem?.id && (p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount)) > 0);
+        const priorDueTotal = priorDuePurchases.reduce((sum, p) => sum + (p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount)), 0);
+        const rollingOverDue = formData.rollPreviousDue && priorDueTotal > 0;
+        if (rollingOverDue) {
+          totalAmount += priorDueTotal;
+        }
+
         const paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalAmount);
         const status = paidAmount <= 0 ? 'Due' : paidAmount >= totalAmount ? 'Paid' : 'Partial';
         const purchaseId = editingItem ? editingItem.id : `#PUR-${Math.floor(1000 + Math.random() * 9000)}`;
+        const received = formData.received !== false; // default true — "not received yet" must be explicitly checked
 
         const purchaseRecord = {
           id: purchaseId,
@@ -757,7 +769,7 @@ export default function App() {
           productId: prod ? prod.id : null,
           productName: prod ? prod.name : (formData.productName || ''),
           category: prod ? prod.category : (formData.category || ''),
-          qty, unitCost, totalAmount, paidAmount, status,
+          qty, unitCost, totalAmount, paidAmount, status, received,
           date: formData.date || new Date().toISOString().split('T')[0],
         };
 
@@ -771,8 +783,22 @@ export default function App() {
           setPurchases([{ ...purchaseRecord, dueAmount: Math.max(0, totalAmount - paidAmount) }, ...purchases]);
         }
 
-        // Optional: add the purchased quantity straight into stock (restocking)
-        if (formData.addToStock && prod) {
+        // Settle the old due purchases from this supplier now that their balance has
+        // been folded into the new record, so they no longer double-count on the Due Amounts page.
+        if (rollingOverDue) {
+          await Promise.all(priorDuePurchases.map(p =>
+            supabase.from('purchases').update({ paid_amount: p.totalAmount, status: 'Paid' }).eq('id', p.id)
+          ));
+          setPurchases(prev => prev.map(p =>
+            priorDuePurchases.some(pd => pd.id === p.id)
+              ? { ...p, paidAmount: p.totalAmount, dueAmount: 0, status: 'Paid' }
+              : p
+          ));
+        }
+
+        // Optional: add the purchased quantity straight into stock (restocking) —
+        // only makes sense once the goods have actually arrived.
+        if (formData.addToStock && prod && received) {
           const newStock = prod.stock + qty;
           await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
           setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
@@ -801,6 +827,28 @@ export default function App() {
       setShowModal(false);
     } catch (err) {
       alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
+  // Mark a "product not received yet" purchase as arrived — optionally add its
+  // quantity into stock right away if it's linked to a real product.
+  const handleMarkPurchaseReceived = async (purchase) => {
+    try {
+      const { error } = await supabase.from('purchases').update({ received: true }).eq('id', purchase.id);
+      if (error) throw error;
+      setPurchases(prev => prev.map(p => p.id === purchase.id ? { ...p, received: true } : p));
+
+      if (purchase.productId) {
+        const prod = products.find(pr => pr.id === purchase.productId);
+        if (prod && window.confirm(`Add ${purchase.qty} unit(s) of "${prod.name}" to stock now that it's arrived?`)) {
+          const newStock = prod.stock + purchase.qty;
+          const { error: stockError } = await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
+          if (stockError) throw stockError;
+          setProducts(prev => prev.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        }
+      }
+    } catch (err) {
+      alert('Could not update — ' + (err.message || 'please check your internet connection and try again.'));
     }
   };
 
@@ -1038,6 +1086,13 @@ export default function App() {
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalVendorDue = vendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
 
+  // --- Advance Payments: purchases already paid for (in full or part) but the
+  // product hasn't arrived from the supplier yet. ---
+  const pendingDeliveries = purchases
+    .filter(p => p.received === false)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const totalAdvancePaid = pendingDeliveries.reduce((sum, p) => sum + p.paidAmount, 0);
+
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
     (!currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch)) &&
@@ -1082,6 +1137,7 @@ export default function App() {
     { name: 'Dashboard', icon: Home }, { name: 'Products', icon: Box },
     { name: 'Categories', icon: Layers }, { name: 'Inventory', icon: Warehouse },
     { name: 'Sales', icon: ShoppingCart }, { name: 'Purchases', icon: PackagePlus },
+    { name: 'Advance Payments', icon: PackageOpen },
     { name: 'Damaged', icon: AlertTriangle },
     { name: 'Customers', icon: Users },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
@@ -1151,10 +1207,11 @@ export default function App() {
           body * {
             visibility: hidden;
           }
-          #printable-invoice-modal, #printable-invoice-modal * {
+          #printable-invoice-modal, #printable-invoice-modal *,
+          #printable-purchase-modal, #printable-purchase-modal * {
             visibility: visible;
           }
-          #printable-invoice-modal {
+          #printable-invoice-modal, #printable-purchase-modal {
             position: absolute;
             left: 0;
             top: 0;
@@ -1472,14 +1529,41 @@ export default function App() {
 
                 {activeTab === 'Purchases' && (
                   <>
-                    <input
-                      required list="supplier-list" name="supplier" defaultValue={formData.supplier || ''}
-                      placeholder="Supplier / Vendor Name" onChange={handleInputChange}
+                    <select
+                      required name="supplier" defaultValue={formData.supplier || ''}
+                      onChange={handleInputChange}
                       className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                    />
-                    <datalist id="supplier-list">
-                      {suppliers.map(s => <option key={s.id} value={s.company} />)}
-                    </datalist>
+                    >
+                      <option value="">Select Supplier...</option>
+                      {suppliers.map(s => <option key={s.id} value={s.company}>{s.company}</option>)}
+                    </select>
+                    {suppliers.length === 0 && (
+                      <p className="text-xs text-amber-600">You don't have any suppliers yet — add one on the Suppliers tab first, then come back here.</p>
+                    )}
+
+                    {(() => {
+                      const existingSupplierDue = formData.supplier
+                        ? purchases
+                            .filter(p => p.supplier === formData.supplier && p.id !== editingItem?.id)
+                            .reduce((sum, p) => sum + (p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount)), 0)
+                        : 0;
+                      if (existingSupplierDue <= 0) return null;
+                      return (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
+                          <p className="text-xs text-amber-800">
+                            <span className="font-bold">{formData.supplier}</span> already has <span className="font-bold">Tk {existingSupplierDue.toLocaleString()}</span> due from earlier purchases.
+                          </p>
+                          <label className="flex items-center gap-2 text-xs font-semibold text-amber-800">
+                            <input
+                              type="checkbox" checked={!!formData.rollPreviousDue}
+                              onChange={(e) => setFormData({ ...formData, rollPreviousDue: e.target.checked })}
+                              className="w-4 h-4 accent-amber-600"
+                            />
+                            Add that Tk {existingSupplierDue.toLocaleString()} to this purchase's total (marks the old due as settled)
+                          </label>
+                        </div>
+                      );
+                    })()}
 
                     <select
                       name="productId" defaultValue={formData.productId || ''}
@@ -1517,10 +1601,21 @@ export default function App() {
                     <p className="text-xs text-[var(--text-muted)]">
                       Leave "Amount Paid Now" blank or 0 for a fully due purchase, equal to the total for fully paid, or anything in between for a partial/half-due payment. The remaining due amount will show on the Due Amounts page under this supplier.
                     </p>
-                    <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
-                      <input type="checkbox" name="addToStock" defaultChecked={!!formData.addToStock} onChange={(e) => setFormData({ ...formData, addToStock: e.target.checked })} className="w-4 h-4 accent-orange-500" />
-                      Add this quantity to product stock
+                    <label className="flex items-center gap-2 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                      <input
+                        type="checkbox"
+                        checked={formData.received === false}
+                        onChange={(e) => setFormData({ ...formData, received: e.target.checked ? false : true, addToStock: e.target.checked ? false : formData.addToStock })}
+                        className="w-4 h-4 accent-amber-600"
+                      />
+                      Product not received yet — this is an advance payment
                     </label>
+                    {formData.received !== false && (
+                      <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
+                        <input type="checkbox" name="addToStock" checked={!!formData.addToStock} onChange={(e) => setFormData({ ...formData, addToStock: e.target.checked })} className="w-4 h-4 accent-orange-500" />
+                        Add this quantity to product stock
+                      </label>
+                    )}
                     <input
                       required name="date" type="date"
                       defaultValue={formData.date || new Date().toISOString().split('T')[0]}
@@ -1705,6 +1800,74 @@ export default function App() {
                   <Printer className="w-3.5 h-3.5" /> Print Receipt
                 </button>
                 <button onClick={() => setSelectedReceipt(null)} className="text-slate-600 hover:text-slate-900 font-bold text-xs px-3 py-2 font-sans">
+                  Close
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* PRINTABLE PURCHASE RECEIPT MODAL — mirrors the sales invoice, sized for a 2.5in thermal printer */}
+        {selectedPurchaseReceipt && (
+          <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center z-50 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="bg-white text-slate-800 rounded-xl w-[300px] shadow-2xl border border-slate-200 overflow-hidden relative font-mono" id="printable-purchase-modal">
+
+              <div className="p-4 text-center border-b border-dashed border-slate-300">
+                <div className="w-9 h-9 mx-auto mb-1.5 bg-orange-500 text-white rounded-lg flex items-center justify-center font-black text-base">
+                  {(shopSettings.shopName || 'S').charAt(0)}
+                </div>
+                <p className="font-extrabold text-sm uppercase tracking-wide leading-tight">{shopSettings.shopName}</p>
+                <p className="text-[10px] text-slate-500 mt-1 leading-snug">Purchase Receipt</p>
+              </div>
+
+              <div className="px-4 py-3 text-[10px] space-y-0.5 border-b border-dashed border-slate-300">
+                <div className="flex justify-between"><span>Purchase:</span><span className="font-bold">{selectedPurchaseReceipt.id}</span></div>
+                <div className="flex justify-between"><span>Date:</span><span>{selectedPurchaseReceipt.date}</span></div>
+                <div className="flex justify-between"><span>Status:</span><span className="font-bold">{selectedPurchaseReceipt.status}</span></div>
+                <div className="flex justify-between"><span>Supplier:</span><span className="font-bold text-right">{selectedPurchaseReceipt.supplier}</span></div>
+              </div>
+
+              {selectedPurchaseReceipt.received === false && (
+                <div className="px-4 py-2.5 bg-blue-50 border-b border-dashed border-slate-300 text-center">
+                  <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wide">⏳ Advance Payment — Awaiting Delivery</span>
+                </div>
+              )}
+
+              <div className="px-4 py-3 border-b border-dashed border-slate-300">
+                <div className="flex justify-between text-[10px] font-bold uppercase text-slate-500 mb-1.5">
+                  <span>Item</span><span>Total</span>
+                </div>
+                <div className="text-[11px]">
+                  <div className="flex justify-between font-semibold">
+                    <span className="pr-2">{selectedPurchaseReceipt.productName || 'Purchased goods'}</span>
+                    <span className="whitespace-nowrap">Tk {selectedPurchaseReceipt.totalAmount.toLocaleString()}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500">{selectedPurchaseReceipt.qty} x Tk {selectedPurchaseReceipt.unitCost.toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div className="px-4 py-3 text-[11px] space-y-1 border-b border-dashed border-slate-300">
+                <div className="flex justify-between text-sm font-black">
+                  <span>TOTAL</span><span>Tk {selectedPurchaseReceipt.totalAmount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between"><span>Paid</span><span>Tk {selectedPurchaseReceipt.paidAmount.toLocaleString()}</span></div>
+                {(() => {
+                  const due = selectedPurchaseReceipt.dueAmount ?? Math.max(0, selectedPurchaseReceipt.totalAmount - selectedPurchaseReceipt.paidAmount);
+                  if (due <= 0) return null;
+                  return <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>;
+                })()}
+              </div>
+
+              <div className="px-4 py-4 text-center text-[10px] text-slate-400">
+                — {shopSettings.proprietor} —
+              </div>
+
+              <div className="bg-slate-50 p-4 flex justify-between items-center no-print">
+                <button onClick={handlePrint} className="bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-md transition-all font-sans">
+                  <Printer className="w-3.5 h-3.5" /> Print Receipt
+                </button>
+                <button onClick={() => setSelectedPurchaseReceipt(null)} className="text-slate-600 hover:text-slate-900 font-bold text-xs px-3 py-2 font-sans">
                   Close
                 </button>
               </div>
@@ -1965,7 +2128,7 @@ export default function App() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                  <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">QTY</th><th className="pb-3">TOTAL</th><th className="pb-3">PAYMENT</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                  <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">QTY</th><th className="pb-3">TOTAL</th><th className="pb-3">PAYMENT</th><th className="pb-3">DELIVERY</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-card)]">
@@ -1987,8 +2150,16 @@ export default function App() {
                         </span>
                       )}
                     </td>
+                    <td className="py-4">
+                      {p.received === false ? (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Awaiting Delivery</span>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Received</span>
+                      )}
+                    </td>
                     <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
                     <td className="py-4 text-right flex justify-end gap-1">
+                      <button onClick={() => setSelectedPurchaseReceipt(p)} title="View & Print Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
                       <button onClick={() => handleOpenEdit(p)} title="Edit Purchase" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(p.id, 'Purchases')} title="Delete Purchase" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
@@ -1998,6 +2169,57 @@ export default function App() {
               </tbody>
             </table>
             )}
+          </div>
+        )}
+
+        {/* ADVANCE PAYMENTS TAB — money already paid to a supplier for goods that haven't arrived yet */}
+        {activeTab === 'Advance Payments' && (
+          <div className="space-y-6">
+            <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl p-6 shadow-sm text-white">
+              <p className="text-sm font-semibold text-blue-100 mb-1">Total Advance Paid, Awaiting Delivery</p>
+              <p className="text-2xl font-black">Tk {totalAdvancePaid.toLocaleString()}</p>
+              <p className="text-xs mt-1 text-blue-100">{pendingDeliveries.length} pending order{pendingDeliveries.length !== 1 ? 's' : ''} from your suppliers</p>
+            </div>
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              {pendingDeliveries.length === 0 ? (
+                <EmptyState
+                  icon={PackageOpen}
+                  title="No advance payments pending"
+                  message={'Nothing owed to you in goods right now. When you record a purchase and check "Product not received yet," it will show up here until you mark it received.'}
+                />
+              ) : (
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                      <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">PAID</th><th className="pb-3">TOTAL</th><th className="pb-3">DATE PAID</th><th className="pb-3 text-right">ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-card)]">
+                    {pendingDeliveries.map(p => (
+                      <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                        <td className="py-4 font-bold text-orange-600">{p.id}</td>
+                        <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
+                        <td className="py-4 font-bold text-blue-600">Tk {p.paidAmount.toLocaleString()}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">Tk {p.totalAmount.toLocaleString()}</td>
+                        <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
+                        <td className="py-4 text-right flex justify-end items-center gap-1">
+                          <button onClick={() => setSelectedPurchaseReceipt(p)} title="View Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                          <button onClick={() => handleOpenEdit(p)} title="Edit" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          <button
+                            onClick={() => handleMarkPurchaseReceived(p)}
+                            className="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm transition-all whitespace-nowrap"
+                          >
+                            Mark as Received
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         )}
 
@@ -2077,6 +2299,7 @@ export default function App() {
                           <td className="py-4 font-black text-red-600">Tk {p.dueAmount.toLocaleString()}</td>
                           <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
                           <td className="py-4 text-right flex justify-end gap-1">
+                            <button onClick={() => setSelectedPurchaseReceipt(p)} title="View Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
                             <button onClick={() => { setActiveTab('Purchases'); handleOpenEdit(p); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                           </td>
                         </tr>
