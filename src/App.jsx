@@ -1248,6 +1248,12 @@ export default function App() {
     .filter(x => x.pendingQty > 0)
     .sort((a, b) => new Date(b.purchase.date) - new Date(a.purchase.date));
   const totalAdvancePaid = pendingDeliveries.reduce((sum, x) => sum + x.pendingQty * x.item.unitCost, 0);
+  const filteredPendingDeliveries = pendingDeliveries.filter(({ purchase, item }) =>
+    !currentSearch ||
+    (purchase.id || '').toLowerCase().includes(currentSearch) ||
+    (purchase.supplier || '').toLowerCase().includes(currentSearch) ||
+    (item.productName || '').toLowerCase().includes(currentSearch)
+  );
 
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
@@ -1483,7 +1489,7 @@ export default function App() {
                 </select>
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -2497,11 +2503,13 @@ export default function App() {
             </div>
 
             <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
-              {pendingDeliveries.length === 0 ? (
+              {filteredPendingDeliveries.length === 0 ? (
                 <EmptyState
                   icon={PackageOpen}
-                  title="No advance payments pending"
-                  message={'Nothing owed to you in goods right now. When a purchase has some or all of its quantity marked "not received yet," it will show up here until you mark it received.'}
+                  title={currentSearch ? 'No matching pending items' : 'No advance payments pending'}
+                  message={currentSearch
+                    ? `Nothing matches "${searchQueries[activeTab]}". Try a different purchase ID, supplier, or item name.`
+                    : 'Nothing owed to you in goods right now. When a purchase has some or all of its quantity marked "not received yet," it will show up here until you mark it received.'}
                 />
               ) : (
                 <table className="w-full text-left text-sm">
@@ -2511,7 +2519,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-card)]">
-                    {pendingDeliveries.map(({ purchase, item, itemIndex, pendingQty }) => (
+                    {filteredPendingDeliveries.map(({ purchase, item, itemIndex, pendingQty }) => (
                       <tr key={`${purchase.id}-${itemIndex}`} className="hover:bg-[var(--bg-hover)] transition-colors">
                         <td className="py-4 font-bold text-orange-600">{purchase.id}</td>
                         <td className="py-4 font-medium text-[var(--text-primary)]">{purchase.supplier}</td>
