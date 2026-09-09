@@ -133,17 +133,51 @@ const dbMap = {
     }),
   },
   purchase: {
-    toDb: (p) => ({
-      id: p.id, supplier: p.supplier, product_id: p.productId || null, product_name: p.productName,
-      category: p.category || '', qty: p.qty, unit_cost: p.unitCost, total_amount: p.totalAmount,
-      paid_amount: p.paidAmount, status: p.status, purchase_date: p.date, received: p.received !== false,
-    }),
-    fromDb: (r) => ({
-      id: r.id, supplier: r.supplier, productId: r.product_id, productName: r.product_name,
-      category: r.category || '', qty: r.qty, unitCost: Number(r.unit_cost), totalAmount: Number(r.total_amount),
-      paidAmount: Number(r.paid_amount), dueAmount: Math.max(0, Number(r.total_amount) - Number(r.paid_amount)),
-      status: r.status, date: r.purchase_date, received: r.received !== false,
-    }),
+    // A purchase can now hold multiple line items (like a sale), and each line item
+    // tracks its own ordered qty vs receivedQty — so a partial delivery from a vendor
+    // (e.g. ordered 10, only 6 arrived) can be entered as one purchase where 6 units are
+    // received (and go straight into stock) while 4 stay pending on Advance Payments.
+    // Legacy single-item columns (product_id, product_name, qty, unit_cost) are still
+    // written from the first line item for backward compatibility with old reports/rows.
+    toDb: (p) => {
+      const items = Array.isArray(p.items) ? p.items : [];
+      const first = items[0] || {};
+      return {
+        id: p.id, supplier: p.supplier, items,
+        product_id: first.productId || null,
+        product_name: items.length > 1 ? `${first.productName || 'Item'} +${items.length - 1} more` : (first.productName || p.productName || ''),
+        category: first.category || p.category || '',
+        qty: items.reduce((sum, i) => sum + (parseInt(i.qty, 10) || 0), 0) || p.qty || 0,
+        unit_cost: first.unitCost ?? p.unitCost ?? 0,
+        total_amount: p.totalAmount, paid_amount: p.paidAmount, status: p.status, purchase_date: p.date,
+        received: p.received !== false,
+      };
+    },
+    fromDb: (r) => {
+      // Old rows (created before multi-item purchases) have no items[] — synthesize a
+      // single-line item from their legacy columns so the rest of the app can treat
+      // every purchase uniformly as { items: [...] }.
+      const items = Array.isArray(r.items) && r.items.length > 0
+        ? r.items.map(i => ({
+            productId: i.productId ?? null, productName: i.productName || 'Item', category: i.category || '',
+            qty: parseInt(i.qty, 10) || 0, unitCost: Number(i.unitCost) || 0,
+            receivedQty: i.receivedQty !== undefined && i.receivedQty !== null ? parseInt(i.receivedQty, 10) : (parseInt(i.qty, 10) || 0),
+            lineTotal: (Number(i.unitCost) || 0) * (parseInt(i.qty, 10) || 0),
+          }))
+        : (r.product_name || r.product_id ? [{
+            productId: r.product_id ?? null, productName: r.product_name || 'Item', category: r.category || '',
+            qty: r.qty || 0, unitCost: Number(r.unit_cost) || 0,
+            receivedQty: r.received !== false ? (r.qty || 0) : 0,
+            lineTotal: (Number(r.unit_cost) || 0) * (r.qty || 0),
+          }] : []);
+      return {
+        id: r.id, supplier: r.supplier, items,
+        totalAmount: Number(r.total_amount), paidAmount: Number(r.paid_amount),
+        dueAmount: Math.max(0, Number(r.total_amount) - Number(r.paid_amount)),
+        status: r.status, date: r.purchase_date,
+        received: items.length === 0 || items.every(i => (i.receivedQty ?? i.qty) >= i.qty),
+      };
+    },
   },
   transaction: {
     toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status }),
@@ -408,6 +442,14 @@ export default function App() {
     { productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }
   ]);
 
+  // Purchase Items State — one row per product being bought from a supplier in this
+  // purchase. receivedQty defaults to the ordered qty (assume full delivery) but can be
+  // lowered when the vendor only ships part of the order; the remainder (qty - receivedQty)
+  // automatically shows up on the Advance Payments page until it's received later.
+  const [purchaseItems, setPurchaseItems] = useState([
+    { productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }
+  ]);
+
   // Category-wise browsing: which category is currently selected for filtering the Products list
   const [productCategoryFilter, setProductCategoryFilter] = useState('');
   // Due Amounts tab: which side is showing — customer dues or vendor dues
@@ -440,6 +482,7 @@ export default function App() {
     setEditingItem(null);
     setFormData({});
     setCartItems([{ productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
+    setPurchaseItems([{ productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }]);
     setShowModal(true);
   };
 
@@ -455,6 +498,17 @@ export default function App() {
         customProductPrice: i.originalPrice ?? i.sellPrice,
         categoryFilter: ''
       })));
+    }
+    if (activeTab === 'Purchases' && item.items) {
+      setPurchaseItems(item.items.length > 0 ? item.items.map(i => ({
+        productId: i.productId || '',
+        productName: i.productName || '',
+        category: i.category || '',
+        qty: i.qty,
+        unitCost: i.unitCost,
+        receivedQty: i.receivedQty !== undefined ? i.receivedQty : i.qty,
+        categoryFilter: '',
+      })) : [{ productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }]);
     }
     setShowModal(true);
   };
@@ -486,6 +540,43 @@ export default function App() {
   const removeCartRow = (index) => {
     if (cartItems.length > 1) {
       setCartItems(cartItems.filter((_, i) => i !== index));
+    }
+  };
+
+  // --- Purchase item rows (multi-product purchases) ---
+  const handlePurchaseItemChange = (index, field, value) => {
+    const updated = [...purchaseItems];
+    const wasFullyReceived = parseInt(updated[index].receivedQty, 10) >= (parseInt(updated[index].qty, 10) || 0);
+    updated[index][field] = value;
+
+    if (field === 'productId') {
+      const selectedProd = products.find(p => p.id === parseInt(value, 10));
+      updated[index].productName = selectedProd ? selectedProd.name : '';
+      updated[index].category = selectedProd ? selectedProd.category : '';
+      if (selectedProd) updated[index].unitCost = selectedProd.buyPrice || updated[index].unitCost;
+    }
+    if (field === 'categoryFilter') {
+      updated[index].productId = '';
+      updated[index].productName = '';
+    }
+    // Keep receivedQty sane whenever the ordered qty changes: if the row was fully
+    // received before, keep it fully received at the new qty (default assumption).
+    // Otherwise just make sure receivedQty never exceeds the new ordered qty.
+    if (field === 'qty') {
+      const qtyNum = parseInt(value, 10) || 0;
+      const prevReceived = parseInt(updated[index].receivedQty, 10) || 0;
+      updated[index].receivedQty = wasFullyReceived ? qtyNum : Math.min(prevReceived, qtyNum);
+    }
+    setPurchaseItems(updated);
+  };
+
+  const addPurchaseItemRow = () => {
+    setPurchaseItems([...purchaseItems, { productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }]);
+  };
+
+  const removePurchaseItemRow = (index) => {
+    if (purchaseItems.length > 1) {
+      setPurchaseItems(purchaseItems.filter((_, i) => i !== index));
     }
   };
 
@@ -743,11 +834,31 @@ export default function App() {
         }
 
       } else if (activeTab === 'Purchases') {
-        const prod = formData.productId ? products.find(p => p.id === parseInt(formData.productId, 10)) : null;
         if (!formData.supplier) return alert('Please select a supplier.');
-        const qty = parseInt(formData.qty, 10) || 1;
-        const unitCost = parseFloat(formData.unitCost) || 0;
-        let totalAmount = parseFloat(formData.totalAmount) || (unitCost * qty);
+
+        // Build the line items: each row can be a catalog product or a free-text
+        // description, with its own ordered qty vs receivedQty (partial delivery support).
+        const processedItems = [];
+        let totalAmount = 0;
+        for (let row of purchaseItems) {
+          const prod = row.productId ? products.find(p => p.id === parseInt(row.productId, 10)) : null;
+          const qty = parseInt(row.qty, 10) || 0;
+          if (qty <= 0) return alert('Enter a valid quantity for every item.');
+          if (!prod && !row.productName) return alert('Select a product or enter an item description for every row.');
+          const unitCost = parseFloat(row.unitCost) || 0;
+          let receivedQty = row.receivedQty === '' || row.receivedQty === undefined || row.receivedQty === null
+            ? qty : parseInt(row.receivedQty, 10);
+          if (isNaN(receivedQty) || receivedQty < 0) receivedQty = 0;
+          if (receivedQty > qty) receivedQty = qty;
+          const lineTotal = unitCost * qty;
+          totalAmount += lineTotal;
+          processedItems.push({
+            productId: prod ? prod.id : null,
+            productName: prod ? prod.name : row.productName,
+            category: prod ? prod.category : (row.category || ''),
+            qty, unitCost, receivedQty, lineTotal,
+          });
+        }
 
         // If the user opted to roll a previous outstanding balance from this same
         // supplier into this purchase, fold it into the total and settle the old entries.
@@ -761,15 +872,13 @@ export default function App() {
         const paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalAmount);
         const status = paidAmount <= 0 ? 'Due' : paidAmount >= totalAmount ? 'Paid' : 'Partial';
         const purchaseId = editingItem ? editingItem.id : `#PUR-${Math.floor(1000 + Math.random() * 9000)}`;
-        const received = formData.received !== false; // default true — "not received yet" must be explicitly checked
+        const fullyReceived = processedItems.every(i => i.receivedQty >= i.qty);
 
         const purchaseRecord = {
           id: purchaseId,
           supplier: formData.supplier,
-          productId: prod ? prod.id : null,
-          productName: prod ? prod.name : (formData.productName || ''),
-          category: prod ? prod.category : (formData.category || ''),
-          qty, unitCost, totalAmount, paidAmount, status, received,
+          items: processedItems,
+          totalAmount, paidAmount, status, received: fullyReceived,
           date: formData.date || new Date().toISOString().split('T')[0],
         };
 
@@ -796,12 +905,28 @@ export default function App() {
           ));
         }
 
-        // Optional: add the purchased quantity straight into stock (restocking) —
-        // only makes sense once the goods have actually arrived.
-        if (formData.addToStock && prod && received) {
-          const newStock = prod.stock + qty;
-          await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
-          setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        // Add whatever quantity actually arrived straight into stock (restocking) — only
+        // for brand-new purchases, and only the receivedQty of each item (not the full
+        // ordered qty), so an item the vendor only part-shipped doesn't overcredit stock.
+        // Later batches of the same purchase are received from the Advance Payments page
+        // instead, which applies its own stock delta — this keeps stock changes from ever
+        // double-counting on a subsequent edit of this purchase.
+        if (!editingItem && formData.addToStock) {
+          const deltaByProduct = {};
+          processedItems.forEach(i => {
+            if (i.productId && i.receivedQty > 0) {
+              deltaByProduct[i.productId] = (deltaByProduct[i.productId] || 0) + i.receivedQty;
+            }
+          });
+          const ids = Object.keys(deltaByProduct);
+          if (ids.length) {
+            await Promise.all(ids.map(pid => {
+              const prod = products.find(p => p.id === parseInt(pid, 10));
+              if (!prod) return null;
+              return supabase.from('products').update({ stock: prod.stock + deltaByProduct[pid] }).eq('id', prod.id);
+            }));
+            setProducts(prev => prev.map(p => deltaByProduct[p.id] ? { ...p, stock: p.stock + deltaByProduct[p.id] } : p));
+          }
         }
 
       } else if (activeTab === 'Transactions') {
@@ -830,18 +955,35 @@ export default function App() {
     }
   };
 
-  // Mark a "product not received yet" purchase as arrived — optionally add its
-  // quantity into stock right away if it's linked to a real product.
-  const handleMarkPurchaseReceived = async (purchase) => {
-    try {
-      const { error } = await supabase.from('purchases').update({ received: true }).eq('id', purchase.id);
-      if (error) throw error;
-      setPurchases(prev => prev.map(p => p.id === purchase.id ? { ...p, received: true } : p));
+  // Receive some or all of the still-pending quantity for one line item of a purchase.
+  // Vendors often deliver in batches, so this asks how many units just arrived (defaulting
+  // to the full pending amount) rather than assuming the whole order showed up at once.
+  const handleReceivePurchaseItem = async (purchase, itemIndex) => {
+    const item = purchase.items[itemIndex];
+    if (!item) return;
+    const pendingQty = item.qty - (item.receivedQty || 0);
+    if (pendingQty <= 0) return;
 
-      if (purchase.productId) {
-        const prod = products.find(pr => pr.id === purchase.productId);
-        if (prod && window.confirm(`Add ${purchase.qty} unit(s) of "${prod.name}" to stock now that it's arrived?`)) {
-          const newStock = prod.stock + purchase.qty;
+    const input = window.prompt(`How many units of "${item.productName}" just arrived? (Pending: ${pendingQty})`, pendingQty);
+    if (input === null) return;
+    let receiveNow = parseInt(input, 10);
+    if (isNaN(receiveNow) || receiveNow <= 0) return alert('Enter a valid quantity greater than 0.');
+    if (receiveNow > pendingQty) receiveNow = pendingQty;
+
+    const updatedItems = purchase.items.map((it, idx) =>
+      idx === itemIndex ? { ...it, receivedQty: (it.receivedQty || 0) + receiveNow } : it
+    );
+    const fullyReceived = updatedItems.every(i => i.receivedQty >= i.qty);
+
+    try {
+      const { error } = await supabase.from('purchases').update({ items: updatedItems, received: fullyReceived }).eq('id', purchase.id);
+      if (error) throw error;
+      setPurchases(prev => prev.map(p => p.id === purchase.id ? { ...p, items: updatedItems, received: fullyReceived } : p));
+
+      if (item.productId) {
+        const prod = products.find(pr => pr.id === item.productId);
+        if (prod && window.confirm(`Add ${receiveNow} unit(s) of "${item.productName}" to stock now that it's arrived?`)) {
+          const newStock = prod.stock + receiveNow;
           const { error: stockError } = await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
           if (stockError) throw stockError;
           setProducts(prev => prev.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
@@ -1086,23 +1228,26 @@ export default function App() {
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalVendorDue = vendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
 
-  // --- Advance Payments: purchases already paid for (in full or part) but the
-  // product hasn't arrived from the supplier yet. ---
+  // --- Advance Payments: individual line items that are still owed by a supplier —
+  // one purchase can have some items fully delivered and others still pending, so this
+  // is flattened per item rather than per whole purchase. ---
   const pendingDeliveries = purchases
-    .filter(p => p.received === false)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
-  const totalAdvancePaid = pendingDeliveries.reduce((sum, p) => sum + p.paidAmount, 0);
+    .flatMap(p => (p.items || []).map((item, itemIndex) => ({ purchase: p, item, itemIndex, pendingQty: item.qty - (item.receivedQty || 0) })))
+    .filter(x => x.pendingQty > 0)
+    .sort((a, b) => new Date(b.purchase.date) - new Date(a.purchase.date));
+  const totalAdvancePaid = pendingDeliveries.reduce((sum, x) => sum + x.pendingQty * x.item.unitCost, 0);
 
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
     (!currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch)) &&
     (!productCategoryFilter || p.category === productCategoryFilter)
   );
+  const purchaseItemsSummary = (p) => (p.items || []).map(i => i.productName).join(', ');
   const filteredPurchases = (purchases || []).filter(p =>
     !currentSearch ||
     (p.id || '').toLowerCase().includes(currentSearch) ||
     (p.supplier || '').toLowerCase().includes(currentSearch) ||
-    (p.productName || '').toLowerCase().includes(currentSearch)
+    purchaseItemsSummary(p).toLowerCase().includes(currentSearch)
   );
   // Products grouped by category, for the category-wise browsing view
   const productsByCategory = filteredProducts.reduce((acc, p) => {
@@ -1203,6 +1348,11 @@ export default function App() {
         }
         .tab-enter { animation: fadeSlideIn 0.25s ease-out; }
 
+        /* Sales receipts print small, on a thermal-receipt roll. Supplier invoices print
+           big, full-page — so the two use separate named @page sizes. */
+        @page { size: A4; margin: 12mm; }
+        @page pos-receipt { size: 2.5in auto; margin: 2mm; }
+
         @media print {
           body * {
             visibility: hidden;
@@ -1211,7 +1361,8 @@ export default function App() {
           #printable-purchase-modal, #printable-purchase-modal * {
             visibility: visible;
           }
-          #printable-invoice-modal, #printable-purchase-modal {
+          #printable-invoice-modal {
+            page: pos-receipt;
             position: absolute;
             left: 0;
             top: 0;
@@ -1222,9 +1373,17 @@ export default function App() {
             box-shadow: none !important;
             border: none !important;
           }
-          @page {
-            size: 2.5in auto;
-            margin: 2mm;
+          #printable-purchase-modal {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100% !important;
+            max-width: none !important;
+            background: white !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            box-shadow: none !important;
+            border: none !important;
           }
           .no-print {
             display: none !important;
@@ -1565,56 +1724,111 @@ export default function App() {
                       );
                     })()}
 
-                    <select
-                      name="productId" defaultValue={formData.productId || ''}
-                      onChange={(e) => {
-                        const selected = products.find(p => p.id === parseInt(e.target.value, 10));
-                        setFormData({ ...formData, productId: e.target.value, productName: selected ? selected.name : '', category: selected ? selected.category : formData.category });
-                      }}
-                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                    >
-                      <option value="">Select Product (optional)</option>
-                      {categories.map(cat => (
-                        <optgroup key={cat.id} label={cat.name}>
-                          {products.filter(p => p.category === cat.name).map(p => (
-                            <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                    {!formData.productId && (
-                      <input
-                        name="productName" defaultValue={formData.productName || ''}
-                        placeholder="Item description (if not in your Products list)" onChange={handleInputChange}
-                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                      />
-                    )}
+                    <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                      <label className="font-bold text-[var(--text-secondary)]">Products in this Purchase:</label>
+                      {purchaseItems.map((row, idx) => {
+                        const rowProducts = row.categoryFilter ? products.filter(p => p.category === row.categoryFilter) : products;
+                        const qtyNum = parseInt(row.qty, 10) || 0;
+                        const receivedNum = row.receivedQty === '' || row.receivedQty === undefined ? qtyNum : (parseInt(row.receivedQty, 10) || 0);
+                        const pendingNum = Math.max(0, qtyNum - receivedNum);
+                        return (
+                          <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
+                            <div className="flex gap-2 items-center">
+                              <select
+                                value={row.categoryFilter}
+                                onChange={(e) => handlePurchaseItemChange(idx, 'categoryFilter', e.target.value)}
+                                title="Filter by category"
+                                className="w-32 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                              >
+                                <option value="">All Categories</option>
+                                {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                              </select>
+                              <select
+                                value={row.productId}
+                                onChange={(e) => handlePurchaseItemChange(idx, 'productId', e.target.value)}
+                                className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                              >
+                                <option value="">Not in Products list...</option>
+                                {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                              </select>
+                              {purchaseItems.length > 1 && (
+                                <button type="button" onClick={() => removePurchaseItemRow(idx)} className="text-red-500 hover:text-red-700 p-1">
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )}
+                            </div>
+                            {!row.productId && (
+                              <input
+                                required
+                                value={row.productName}
+                                onChange={(e) => handlePurchaseItemChange(idx, 'productName', e.target.value)}
+                                placeholder="Item description (if not in your Products list)"
+                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                              />
+                            )}
+                            <div className="flex gap-2 items-center pl-1">
+                              <div className="flex-1">
+                                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Ordered Qty</label>
+                                <input
+                                  required type="number" min="1" value={row.qty}
+                                  onChange={(e) => handlePurchaseItemChange(idx, 'qty', e.target.value)}
+                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
+                                />
+                              </div>
+                              <div className="flex-1">
+                                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Unit Cost (Tk)</label>
+                                <input
+                                  required type="number" step="0.01" value={row.unitCost}
+                                  onChange={(e) => handlePurchaseItemChange(idx, 'unitCost', e.target.value)}
+                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400"
+                                />
+                              </div>
+                            </div>
+                            <div className="pl-1">
+                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Received Qty Now (leave lower than Ordered if the vendor only sent part)</label>
+                              <input
+                                type="number" min="0" max={qtyNum || undefined} value={row.receivedQty}
+                                onChange={(e) => handlePurchaseItemChange(idx, 'receivedQty', e.target.value)}
+                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
+                              />
+                            </div>
+                            {pendingNum > 0 && (
+                              <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-[11px] font-bold px-2 py-1 rounded-lg">
+                                ⏳ {pendingNum} unit{pendingNum !== 1 ? 's' : ''} still pending — will show on Advance Payments
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button type="button" onClick={addPurchaseItemRow} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline pt-1">
+                      <Plus className="w-4 h-4" /> Add Another Item
+                    </button>
 
-                    <div className="flex gap-4">
-                      <input required name="qty" type="number" min="1" defaultValue={formData.qty || 1} placeholder="Quantity" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <input required name="unitCost" type="number" step="0.01" defaultValue={formData.unitCost || ''} placeholder="Unit Cost (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    </div>
-                    <div className="flex gap-4">
-                      <input name="totalAmount" type="number" step="0.01" defaultValue={formData.totalAmount || ''} placeholder="Total Amount (Tk) — auto if blank" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <input name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''} placeholder="Amount Paid Now (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    </div>
+                    {(() => {
+                      const purchaseTotal = purchaseItems.reduce((sum, r) => sum + ((parseFloat(r.unitCost) || 0) * (parseInt(r.qty, 10) || 0)), 0);
+                      return (
+                        <div className="flex justify-between items-center bg-[var(--bg-hover)] rounded-xl p-3 text-sm">
+                          <span className="font-bold text-[var(--text-secondary)]">Purchase Total</span>
+                          <span className="font-black text-[var(--text-primary)]">Tk {purchaseTotal.toLocaleString()}</span>
+                        </div>
+                      );
+                    })()}
+
+                    <input name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''} placeholder="Amount Paid Now (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <p className="text-xs text-[var(--text-muted)]">
                       Leave "Amount Paid Now" blank or 0 for a fully due purchase, equal to the total for fully paid, or anything in between for a partial/half-due payment. The remaining due amount will show on the Due Amounts page under this supplier.
                     </p>
-                    <label className="flex items-center gap-2 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                      <input
-                        type="checkbox"
-                        checked={formData.received === false}
-                        onChange={(e) => setFormData({ ...formData, received: e.target.checked ? false : true, addToStock: e.target.checked ? false : formData.addToStock })}
-                        className="w-4 h-4 accent-amber-600"
-                      />
-                      Product not received yet — this is an advance payment
-                    </label>
-                    {formData.received !== false && (
+                    {!editingItem && (
                       <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)]">
                         <input type="checkbox" name="addToStock" checked={!!formData.addToStock} onChange={(e) => setFormData({ ...formData, addToStock: e.target.checked })} className="w-4 h-4 accent-orange-500" />
-                        Add this quantity to product stock
+                        Add received quantities to product stock now
                       </label>
+                    )}
+                    {editingItem && (
+                      <p className="text-xs text-[var(--text-muted)] bg-[var(--bg-hover)] rounded-xl p-3">
+                        To receive more of a pending item later, use "Mark as Received" on the Advance Payments page — that keeps stock counts from being added twice.
+                      </p>
                     )}
                     <input
                       required name="date" type="date"
@@ -1808,66 +2022,110 @@ export default function App() {
           </div>
         )}
 
-        {/* PRINTABLE PURCHASE RECEIPT MODAL — mirrors the sales invoice, sized for a 2.5in thermal printer */}
+        {/* PRINTABLE SUPPLIER INVOICE MODAL — a full, big, letter-style invoice (unlike the
+            small thermal-receipt customer invoice), since this is the paperwork kept for
+            supplier/accounting records and needs room for a full line-item table. */}
         {selectedPurchaseReceipt && (
-          <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center z-50 backdrop-blur-sm p-4 overflow-y-auto">
-            <div className="bg-white text-slate-800 rounded-xl w-[300px] shadow-2xl border border-slate-200 overflow-hidden relative font-mono" id="printable-purchase-modal">
+          <div className="fixed inset-0 bg-slate-950/70 flex items-start justify-center z-50 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="bg-white text-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl border border-slate-200 overflow-hidden relative font-sans my-6" id="printable-purchase-modal">
 
-              <div className="p-4 text-center border-b border-dashed border-slate-300">
-                <div className="w-9 h-9 mx-auto mb-1.5 bg-orange-500 text-white rounded-lg flex items-center justify-center font-black text-base">
-                  {(shopSettings.shopName || 'S').charAt(0)}
+              {/* Letterhead */}
+              <div className="flex items-start justify-between px-10 pt-10 pb-6 border-b-2 border-slate-800">
+                <div className="flex items-center gap-4">
+                  <div className="w-16 h-16 bg-orange-500 text-white rounded-2xl flex items-center justify-center font-black text-3xl shrink-0">
+                    {(shopSettings.shopName || 'S').charAt(0)}
+                  </div>
+                  <div>
+                    <p className="font-black text-2xl uppercase tracking-wide leading-tight">{shopSettings.shopName}</p>
+                    <p className="text-sm text-slate-500 mt-1 leading-snug">{shopSettings.address}</p>
+                    <p className="text-sm text-slate-500">{shopSettings.phone}</p>
+                  </div>
                 </div>
-                <p className="font-extrabold text-sm uppercase tracking-wide leading-tight">{shopSettings.shopName}</p>
-                <p className="text-[10px] text-slate-500 mt-1 leading-snug">Purchase Receipt</p>
+                <div className="text-right shrink-0">
+                  <p className="text-2xl font-black uppercase tracking-wider text-slate-800">Supplier Invoice</p>
+                  <p className="text-sm text-slate-500 mt-1">{selectedPurchaseReceipt.id}</p>
+                </div>
               </div>
 
-              <div className="px-4 py-3 text-[10px] space-y-0.5 border-b border-dashed border-slate-300">
-                <div className="flex justify-between"><span>Purchase:</span><span className="font-bold">{selectedPurchaseReceipt.id}</span></div>
-                <div className="flex justify-between"><span>Date:</span><span>{selectedPurchaseReceipt.date}</span></div>
-                <div className="flex justify-between"><span>Status:</span><span className="font-bold">{selectedPurchaseReceipt.status}</span></div>
-                <div className="flex justify-between"><span>Supplier:</span><span className="font-bold text-right">{selectedPurchaseReceipt.supplier}</span></div>
+              {/* Purchase + supplier details */}
+              <div className="grid grid-cols-2 gap-6 px-10 py-6 border-b border-slate-200 text-sm">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-slate-400 mb-1">Supplier</p>
+                  <p className="font-bold text-base text-slate-800">{selectedPurchaseReceipt.supplier}</p>
+                </div>
+                <div className="text-right space-y-1">
+                  <div className="flex justify-between gap-6"><span className="text-slate-500">Purchase Date</span><span className="font-semibold">{selectedPurchaseReceipt.date}</span></div>
+                  <div className="flex justify-between gap-6"><span className="text-slate-500">Payment Status</span><span className="font-semibold">{selectedPurchaseReceipt.status}</span></div>
+                  <div className="flex justify-between gap-6">
+                    <span className="text-slate-500">Delivery Status</span>
+                    <span className="font-semibold">{selectedPurchaseReceipt.received === false ? 'Partially / Not Received' : 'Fully Received'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Line items */}
+              <div className="px-10 py-6">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b-2 border-slate-800 text-xs font-bold uppercase tracking-wide text-slate-500">
+                      <th className="pb-2 text-left">Product</th>
+                      <th className="pb-2 text-right">Ordered</th>
+                      <th className="pb-2 text-right">Received</th>
+                      <th className="pb-2 text-right">Pending</th>
+                      <th className="pb-2 text-right">Unit Cost</th>
+                      <th className="pb-2 text-right">Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(selectedPurchaseReceipt.items || []).map((item, idx) => {
+                      const pending = Math.max(0, item.qty - (item.receivedQty || 0));
+                      return (
+                        <tr key={idx}>
+                          <td className="py-2.5 font-semibold text-slate-800">{item.productName}</td>
+                          <td className="py-2.5 text-right">{item.qty}</td>
+                          <td className="py-2.5 text-right">{item.receivedQty ?? item.qty}</td>
+                          <td className="py-2.5 text-right">
+                            {pending > 0 ? <span className="font-bold text-blue-600">{pending}</span> : <span className="text-slate-300">—</span>}
+                          </td>
+                          <td className="py-2.5 text-right">Tk {item.unitCost.toLocaleString()}</td>
+                          <td className="py-2.5 text-right font-semibold">Tk {item.lineTotal.toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
 
               {selectedPurchaseReceipt.received === false && (
-                <div className="px-4 py-2.5 bg-blue-50 border-b border-dashed border-slate-300 text-center">
-                  <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wide">⏳ Advance Payment — Awaiting Delivery</span>
+                <div className="mx-10 mb-6 px-4 py-3 bg-blue-50 border border-blue-200 rounded-xl text-center">
+                  <span className="text-xs font-bold text-blue-700 uppercase tracking-wide">⏳ Some quantity is still pending delivery — see Advance Payments</span>
                 </div>
               )}
 
-              <div className="px-4 py-3 border-b border-dashed border-slate-300">
-                <div className="flex justify-between text-[10px] font-bold uppercase text-slate-500 mb-1.5">
-                  <span>Item</span><span>Total</span>
-                </div>
-                <div className="text-[11px]">
-                  <div className="flex justify-between font-semibold">
-                    <span className="pr-2">{selectedPurchaseReceipt.productName || 'Purchased goods'}</span>
-                    <span className="whitespace-nowrap">Tk {selectedPurchaseReceipt.totalAmount.toLocaleString()}</span>
+              {/* Totals */}
+              <div className="px-10 pb-8 flex justify-end">
+                <div className="w-72 space-y-2 text-sm">
+                  <div className="flex justify-between text-lg font-black pt-2 border-t-2 border-slate-800">
+                    <span>TOTAL</span><span>Tk {selectedPurchaseReceipt.totalAmount.toLocaleString()}</span>
                   </div>
-                  <div className="text-[10px] text-slate-500">{selectedPurchaseReceipt.qty} x Tk {selectedPurchaseReceipt.unitCost.toLocaleString()}</div>
+                  <div className="flex justify-between text-emerald-700"><span>Paid</span><span>Tk {selectedPurchaseReceipt.paidAmount.toLocaleString()}</span></div>
+                  {(() => {
+                    const due = selectedPurchaseReceipt.dueAmount ?? Math.max(0, selectedPurchaseReceipt.totalAmount - selectedPurchaseReceipt.paidAmount);
+                    if (due <= 0) return null;
+                    return <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>;
+                  })()}
                 </div>
               </div>
 
-              <div className="px-4 py-3 text-[11px] space-y-1 border-b border-dashed border-slate-300">
-                <div className="flex justify-between text-sm font-black">
-                  <span>TOTAL</span><span>Tk {selectedPurchaseReceipt.totalAmount.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between"><span>Paid</span><span>Tk {selectedPurchaseReceipt.paidAmount.toLocaleString()}</span></div>
-                {(() => {
-                  const due = selectedPurchaseReceipt.dueAmount ?? Math.max(0, selectedPurchaseReceipt.totalAmount - selectedPurchaseReceipt.paidAmount);
-                  if (due <= 0) return null;
-                  return <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>;
-                })()}
+              <div className="px-10 py-6 border-t border-slate-200 text-center text-xs text-slate-400">
+                Authorized by — {shopSettings.proprietor}
               </div>
 
-              <div className="px-4 py-4 text-center text-[10px] text-slate-400">
-                — {shopSettings.proprietor} —
-              </div>
-
-              <div className="bg-slate-50 p-4 flex justify-between items-center no-print">
-                <button onClick={handlePrint} className="bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-md transition-all font-sans">
-                  <Printer className="w-3.5 h-3.5" /> Print Receipt
+              <div className="bg-slate-50 px-10 py-5 flex justify-between items-center no-print">
+                <button onClick={handlePrint} className="bg-orange-500 hover:bg-orange-600 text-white font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md transition-all">
+                  <Printer className="w-4 h-4" /> Print Invoice
                 </button>
-                <button onClick={() => setSelectedPurchaseReceipt(null)} className="text-slate-600 hover:text-slate-900 font-bold text-xs px-3 py-2 font-sans">
+                <button onClick={() => setSelectedPurchaseReceipt(null)} className="text-slate-600 hover:text-slate-900 font-bold text-sm px-3 py-2">
                   Close
                 </button>
               </div>
@@ -2128,18 +2386,23 @@ export default function App() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                  <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">QTY</th><th className="pb-3">TOTAL</th><th className="pb-3">PAYMENT</th><th className="pb-3">DELIVERY</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
+                  <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEMS</th><th className="pb-3">QTY</th><th className="pb-3">TOTAL</th><th className="pb-3">PAYMENT</th><th className="pb-3">DELIVERY</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-card)]">
                 {filteredPurchases.map(p => {
                   const due = p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount);
+                  const items = p.items || [];
+                  const totalQty = items.reduce((s, i) => s + i.qty, 0);
+                  const totalPending = items.reduce((s, i) => s + Math.max(0, i.qty - (i.receivedQty || 0)), 0);
                   return (
                   <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                     <td className="py-4 font-bold text-orange-600">{p.id}</td>
                     <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">{p.qty}</td>
+                    <td className="py-4 text-[var(--text-secondary)]">
+                      {items.length > 0 ? items.map(i => i.productName).join(', ') : '—'}
+                    </td>
+                    <td className="py-4 text-[var(--text-secondary)]">{totalQty}</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.totalAmount.toLocaleString()}</td>
                     <td className="py-4">
                       {due <= 0 ? (
@@ -2151,15 +2414,15 @@ export default function App() {
                       )}
                     </td>
                     <td className="py-4">
-                      {p.received === false ? (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Awaiting Delivery</span>
+                      {totalPending > 0 ? (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">{totalPending} Pending</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Received</span>
                       )}
                     </td>
                     <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
                     <td className="py-4 text-right flex justify-end gap-1">
-                      <button onClick={() => setSelectedPurchaseReceipt(p)} title="View & Print Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                      <button onClick={() => setSelectedPurchaseReceipt(p)} title="View & Print Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
                       <button onClick={() => handleOpenEdit(p)} title="Edit Purchase" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(p.id, 'Purchases')} title="Delete Purchase" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
@@ -2172,13 +2435,14 @@ export default function App() {
           </div>
         )}
 
-        {/* ADVANCE PAYMENTS TAB — money already paid to a supplier for goods that haven't arrived yet */}
+        {/* ADVANCE PAYMENTS TAB — individual line items still owed by a supplier, e.g. the
+            leftover quantity from a partially-delivered purchase */}
         {activeTab === 'Advance Payments' && (
           <div className="space-y-6">
             <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl p-6 shadow-sm text-white">
-              <p className="text-sm font-semibold text-blue-100 mb-1">Total Advance Paid, Awaiting Delivery</p>
+              <p className="text-sm font-semibold text-blue-100 mb-1">Value of Goods Still Awaiting Delivery</p>
               <p className="text-2xl font-black">Tk {totalAdvancePaid.toLocaleString()}</p>
-              <p className="text-xs mt-1 text-blue-100">{pendingDeliveries.length} pending order{pendingDeliveries.length !== 1 ? 's' : ''} from your suppliers</p>
+              <p className="text-xs mt-1 text-blue-100">{pendingDeliveries.length} pending item{pendingDeliveries.length !== 1 ? 's' : ''} from your suppliers</p>
             </div>
 
             <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
@@ -2186,29 +2450,28 @@ export default function App() {
                 <EmptyState
                   icon={PackageOpen}
                   title="No advance payments pending"
-                  message={'Nothing owed to you in goods right now. When you record a purchase and check "Product not received yet," it will show up here until you mark it received.'}
+                  message={'Nothing owed to you in goods right now. When a purchase has some or all of its quantity marked "not received yet," it will show up here until you mark it received.'}
                 />
               ) : (
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                      <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">PAID</th><th className="pb-3">TOTAL</th><th className="pb-3">DATE PAID</th><th className="pb-3 text-right">ACTION</th>
+                      <th className="pb-3">PURCHASE ID</th><th className="pb-3">SUPPLIER</th><th className="pb-3">ITEM</th><th className="pb-3">PENDING QTY</th><th className="pb-3">VALUE</th><th className="pb-3">PURCHASE DATE</th><th className="pb-3 text-right">ACTION</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-card)]">
-                    {pendingDeliveries.map(p => (
-                      <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                        <td className="py-4 font-bold text-orange-600">{p.id}</td>
-                        <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
-                        <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
-                        <td className="py-4 font-bold text-blue-600">Tk {p.paidAmount.toLocaleString()}</td>
-                        <td className="py-4 text-[var(--text-secondary)]">Tk {p.totalAmount.toLocaleString()}</td>
-                        <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
+                    {pendingDeliveries.map(({ purchase, item, itemIndex, pendingQty }) => (
+                      <tr key={`${purchase.id}-${itemIndex}`} className="hover:bg-[var(--bg-hover)] transition-colors">
+                        <td className="py-4 font-bold text-orange-600">{purchase.id}</td>
+                        <td className="py-4 font-medium text-[var(--text-primary)]">{purchase.supplier}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">{item.productName || '—'}</td>
+                        <td className="py-4 font-bold text-blue-600">{pendingQty} of {item.qty}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">Tk {(pendingQty * item.unitCost).toLocaleString()}</td>
+                        <td className="py-4 text-[var(--text-muted)]">{purchase.date}</td>
                         <td className="py-4 text-right flex justify-end items-center gap-1">
-                          <button onClick={() => setSelectedPurchaseReceipt(p)} title="View Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                          <button onClick={() => handleOpenEdit(p)} title="Edit" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          <button onClick={() => setSelectedPurchaseReceipt(purchase)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
                           <button
-                            onClick={() => handleMarkPurchaseReceived(p)}
+                            onClick={() => handleReceivePurchaseItem(purchase, itemIndex)}
                             className="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm transition-all whitespace-nowrap"
                           >
                             Mark as Received
@@ -2293,7 +2556,7 @@ export default function App() {
                         <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                           <td className="py-4 font-bold text-orange-600">{p.id}</td>
                           <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
-                          <td className="py-4 text-[var(--text-secondary)]">{p.productName || '—'}</td>
+                          <td className="py-4 text-[var(--text-secondary)]">{(p.items || []).map(i => i.productName).join(', ') || '—'}</td>
                           <td className="py-4 text-[var(--text-secondary)]">Tk {p.totalAmount.toLocaleString()}</td>
                           <td className="py-4 text-emerald-700">Tk {p.paidAmount.toLocaleString()}</td>
                           <td className="py-4 font-black text-red-600">Tk {p.dueAmount.toLocaleString()}</td>
