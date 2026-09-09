@@ -137,6 +137,10 @@ const dbMap = {
     toDb: (s) => ({ shop_name: s.shopName, proprietor: s.proprietor, phone: s.phone, address: s.address, currency: s.currency, receipt_policies: s.receiptPolicies }),
     fromDb: (r) => ({ shopName: r.shop_name, proprietor: r.proprietor, phone: r.phone, address: r.address, currency: r.currency, receiptPolicies: r.receipt_policies || [] }),
   },
+  damaged: {
+    toDb: (d) => ({ product_id: d.productId || null, product_name: d.productName, qty: d.qty, reason: d.reason, damage_date: d.date }),
+    fromDb: (r) => ({ id: r.id, productId: r.product_id, productName: r.product_name, qty: r.qty, reason: r.reason, date: r.damage_date }),
+  },
 };
 
 // --- Email/password login screen. New accounts are granted by the owner,
@@ -290,6 +294,7 @@ export default function App() {
   const [customers, setCustomers] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [damagedProducts, setDamagedProducts] = useState([]);
   const [shopSettings, setShopSettings] = useState(defaultSettings);
 
   useEffect(() => {
@@ -304,7 +309,7 @@ export default function App() {
   const loadAllData = async () => {
     setDataLoading(true);
     try {
-      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes] = await Promise.all([
+      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes] = await Promise.all([
         supabase.from('categories').select('*').order('id'),
         supabase.from('products').select('*').order('id'),
         supabase.from('customers').select('*').order('id'),
@@ -312,6 +317,7 @@ export default function App() {
         supabase.from('sales').select('*').order('created_at', { ascending: false }),
         supabase.from('transactions').select('*').order('created_at', { ascending: false }),
         supabase.from('shop_settings').select('*').maybeSingle(),
+        supabase.from('damaged_products').select('*').order('created_at', { ascending: false }),
       ]);
 
       setCategories((catRes.data || []).map(dbMap.category.fromDb));
@@ -320,6 +326,7 @@ export default function App() {
       setSuppliers((supRes.data || []).map(dbMap.supplier.fromDb));
       setSales((saleRes.data || []).map(dbMap.sale.fromDb));
       setTransactions((txnRes.data || []).map(dbMap.transaction.fromDb));
+      setDamagedProducts((damagedRes.data || []).map(dbMap.damaged.fromDb));
 
       if (settingsRes.data) {
         setShopSettings({ ...defaultSettings, ...dbMap.settings.fromDb(settingsRes.data) });
@@ -523,6 +530,28 @@ export default function App() {
           date: formData.date || new Date().toISOString().split('T')[0]
         };
 
+        // Auto-add this customer to the Customers list if they gave us details and
+        // aren't already on file (matched by phone, or by name if no phone given).
+        if (saleRecord.customer && saleRecord.customer !== 'Walk-in Customer') {
+          const alreadyExists = customers.some(c =>
+            (saleRecord.customerPhone && c.phone && c.phone === saleRecord.customerPhone) ||
+            (!saleRecord.customerPhone && (c.name || '').toLowerCase() === saleRecord.customer.toLowerCase())
+          );
+          if (!alreadyExists) {
+            const newCustomerData = {
+              name: saleRecord.customer,
+              email: '',
+              phone: saleRecord.customerPhone || '',
+              address: saleRecord.customerAddress || '',
+            };
+            const { data: newCustRow, error: custError } = await supabase
+              .from('customers').insert(dbMap.customer.toDb(newCustomerData)).select().single();
+            if (!custError && newCustRow) {
+              setCustomers(prev => [...prev, dbMap.customer.fromDb(newCustRow)]);
+            }
+          }
+        }
+
         // Build the list of { productId, newStock } for every product touched by this sale
         const stockUpdates = processedItems.map(item => {
           const prod = workingProducts.find(p => p.id === item.productId);
@@ -606,6 +635,43 @@ export default function App() {
           if (error) throw error;
           setSuppliers([...suppliers, dbMap.supplier.fromDb(data)]);
         }
+      } else if (activeTab === 'Damaged') {
+        const prod = products.find(p => p.id === parseInt(formData.productId, 10));
+        if (!prod) return alert('Please select a valid product.');
+        const qty = parseInt(formData.qty, 10) || 1;
+
+        // When editing, restore the previously-deducted qty first so the stock check is accurate
+        const availableStock = editingItem && editingItem.productId === prod.id
+          ? prod.stock + (parseInt(editingItem.qty, 10) || 0)
+          : prod.stock;
+
+        if (qty > availableStock) {
+          return alert(`Not enough stock for ${prod.name}. Available: ${availableStock}`);
+        }
+
+        const damagedRecord = {
+          productId: prod.id,
+          productName: prod.name,
+          qty,
+          reason: formData.reason || '',
+          date: formData.date || new Date().toISOString().split('T')[0],
+        };
+
+        const newStock = availableStock - qty;
+
+        if (editingItem) {
+          const { error } = await supabase.from('damaged_products').update(dbMap.damaged.toDb(damagedRecord)).eq('id', editingItem.id);
+          if (error) throw error;
+          setDamagedProducts(damagedProducts.map(d => d.id === editingItem.id ? { ...damagedRecord, id: editingItem.id } : d));
+        } else {
+          const { data, error } = await supabase.from('damaged_products').insert(dbMap.damaged.toDb(damagedRecord)).select().single();
+          if (error) throw error;
+          setDamagedProducts([dbMap.damaged.fromDb(data), ...damagedProducts]);
+        }
+
+        await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
+        setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+
       } else if (activeTab === 'Transactions') {
         if (editingItem) {
           const updated = { ...editingItem, ...formData, amount: parseFloat(formData.amount) };
@@ -635,7 +701,39 @@ export default function App() {
   const handleDelete = async (id, type) => {
     if (!window.confirm("Are you sure you want to delete this record?")) return;
     try {
-      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions' };
+      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Damaged: 'damaged_products' };
+
+      if (type === 'Sales') {
+        // Put the sold quantities back into inventory before removing the sale record.
+        const saleToDelete = sales.find(s => s.id === id);
+        if (saleToDelete) {
+          const restoredProducts = products.map(p => {
+            const soldItem = saleToDelete.items.find(i => i.productId === p.id);
+            return soldItem ? { ...p, stock: p.stock + soldItem.qty } : p;
+          });
+          await Promise.all(
+            saleToDelete.items.map(i => {
+              const restored = restoredProducts.find(p => p.id === i.productId);
+              return restored ? supabase.from('products').update({ stock: restored.stock }).eq('id', i.productId) : null;
+            })
+          );
+          setProducts(restoredProducts);
+        }
+      }
+
+      if (type === 'Damaged') {
+        // Put the damaged quantity back into inventory before removing the log entry.
+        const entryToDelete = damagedProducts.find(d => d.id === id);
+        if (entryToDelete && entryToDelete.productId) {
+          const prod = products.find(p => p.id === entryToDelete.productId);
+          if (prod) {
+            const restoredStock = prod.stock + (parseInt(entryToDelete.qty, 10) || 0);
+            await supabase.from('products').update({ stock: restoredStock }).eq('id', prod.id);
+            setProducts(products.map(p => p.id === prod.id ? { ...p, stock: restoredStock } : p));
+          }
+        }
+      }
+
       const { error } = await supabase.from(tableMap[type]).delete().eq('id', id);
       if (error) throw error;
 
@@ -651,6 +749,7 @@ export default function App() {
       if (type === 'Customers') setCustomers(customers.filter(c => c.id !== id));
       if (type === 'Suppliers') setSuppliers(suppliers.filter(s => s.id !== id));
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
+      if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
     } catch (err) {
       alert('Could not delete — ' + (err.message || 'please check your internet connection and try again.'));
     }
@@ -815,7 +914,7 @@ export default function App() {
   const lowStockProducts = products.filter(p => p.stock <= (p.reorderLevel || 5));
 
   // Safe lookup map used by the generic tables instead of eval()
-  const genericDataMap = { categories, customers, suppliers, transactions };
+  const genericDataMap = { categories, customers, suppliers, transactions, damaged: damagedProducts };
 
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
@@ -847,7 +946,8 @@ export default function App() {
   const navItems = [
     { name: 'Dashboard', icon: Home }, { name: 'Products', icon: Box },
     { name: 'Categories', icon: Layers }, { name: 'Inventory', icon: Warehouse },
-    { name: 'Sales', icon: ShoppingCart }, { name: 'Customers', icon: Users },
+    { name: 'Sales', icon: ShoppingCart }, { name: 'Damaged', icon: AlertTriangle },
+    { name: 'Customers', icon: Users },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
     { name: 'Reports', icon: PieChart }, { name: 'Settings', icon: Settings }
   ];
@@ -1005,7 +1105,7 @@ export default function App() {
             <p className="text-xs text-[var(--text-muted)] font-medium">{shopSettings.shopName} Management System</p>
           </div>
           <div className="flex items-center gap-3">
-            {['Products', 'Categories', 'Sales', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -1016,12 +1116,12 @@ export default function App() {
                 />
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
               <button 
                 onClick={handleOpenAdd}
                 className="bg-orange-500 text-white text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-600 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5"
               >
-                <Plus className="w-5 h-5" /> Add New {activeTab === 'Sales' ? 'Sale' : activeTab.slice(0, -1)}
+                <Plus className="w-5 h-5" /> Add New {activeTab === 'Sales' ? 'Sale' : activeTab === 'Damaged' ? 'Damage Entry' : activeTab.slice(0, -1)}
               </button>
             )}
           </div>
@@ -1045,7 +1145,7 @@ export default function App() {
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
             <div className={`bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] transition-colors ${activeTab === 'Sales' ? 'w-[700px]' : 'w-[480px]'}`}>
               <div className="flex justify-between items-center mb-5">
-                <h3 className="text-lg font-bold text-[var(--text-primary)]">{editingItem ? 'Edit' : 'Add New'} {activeTab.slice(0, -1)}</h3>
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">{editingItem ? 'Edit' : 'Add New'} {activeTab === 'Damaged' ? 'Damage Entry' : activeTab.slice(0, -1)}</h3>
                 <button onClick={() => setShowModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
               </div>
 
@@ -1059,7 +1159,29 @@ export default function App() {
                     </select>
                     <div className="flex gap-4">
                       <input required name="buyPrice" type="number" step="0.01" defaultValue={formData.buyPrice || ''} placeholder="Buy Price (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <input required name="sellPrice" type="number" step="0.01" defaultValue={formData.sellPrice || ''} placeholder="Sell Price (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <div className="relative">
+                        <input
+                          required name="sellPrice" type="number" step="50"
+                          value={formData.sellPrice ?? ''}
+                          placeholder="Sell Price (Tk)"
+                          onChange={handleInputChange}
+                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 pr-16 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                        />
+                        <div className="absolute right-1.5 top-1.5 bottom-1.5 flex flex-col">
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, sellPrice: (parseFloat(formData.sellPrice) || 0) + 50 })}
+                            className="flex-1 px-1.5 text-[10px] font-bold text-orange-500 hover:text-orange-600 leading-none"
+                            title="Increase by 50"
+                          >▲</button>
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, sellPrice: Math.max(0, (parseFloat(formData.sellPrice) || 0) - 50) })}
+                            className="flex-1 px-1.5 text-[10px] font-bold text-orange-500 hover:text-orange-600 leading-none"
+                            title="Decrease by 50"
+                          >▼</button>
+                        </div>
+                      </div>
                     </div>
                     <div className="flex gap-4">
                       <input required name="stock" type="number" defaultValue={formData.stock !== undefined ? formData.stock : ''} placeholder="Current Stock" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
@@ -1151,6 +1273,43 @@ export default function App() {
                     <input name="email" defaultValue={formData.email || ''} placeholder="Email Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="phone" defaultValue={formData.phone || ''} placeholder="Phone Number" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                   </>
+                )}
+
+                {activeTab === 'Damaged' && (
+                  <div className="space-y-4">
+                    <select
+                      required name="productId"
+                      defaultValue={formData.productId || ''}
+                      onChange={(e) => {
+                        const selected = products.find(p => p.id === parseInt(e.target.value, 10));
+                        setFormData({ ...formData, productId: e.target.value, productName: selected ? selected.name : '' });
+                      }}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    >
+                      <option value="">Select Product</option>
+                      {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                    </select>
+                    <input
+                      required name="qty" type="number" min="1" defaultValue={formData.qty || 1}
+                      placeholder="Quantity Damaged" onChange={handleInputChange}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                    <input
+                      name="reason" defaultValue={formData.reason || ''}
+                      placeholder="Reason (e.g. dropped, water damage, defective)"
+                      onChange={handleInputChange}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                    <input
+                      required name="date" type="date"
+                      defaultValue={formData.date || new Date().toISOString().split('T')[0]}
+                      onChange={handleInputChange}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                    <p className="text-xs text-[var(--text-muted)]">
+                      This will remove the damaged quantity from that product's stock automatically.
+                    </p>
+                  </div>
                 )}
 
                 {activeTab === 'Transactions' && (
@@ -1570,7 +1729,7 @@ export default function App() {
         )}
 
         {/* GENERIC TABLES FOR OTHER TABS */}
-        {['Categories', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+        {['Categories', 'Customers', 'Suppliers', 'Transactions', 'Damaged'].includes(activeTab) && (
           <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
             {genericDataMap[activeTab.toLowerCase()].length === 0 ? (
               <EmptyState icon={Inbox} title={`No ${activeTab.toLowerCase()} yet`} message={`Click 'Add New ${activeTab.slice(0, -1)}' to create your first entry.`} />
