@@ -433,6 +433,8 @@ export default function App() {
   // Styled "Mark as Received" modal state — replaces the old window.prompt() flow
   const [receiveModal, setReceiveModal] = useState(null); // { purchase, itemIndex, item, pendingQty }
   const [receiveQtyInput, setReceiveQtyInput] = useState('');
+  // Styled delete-confirmation modal state — replaces the old window.confirm() flow
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { id, type }
 
   // Settings Form State — kept in sync with shopSettings once it loads from Supabase
   const [settingsForm, setSettingsForm] = useState(shopSettings);
@@ -1006,8 +1008,13 @@ export default function App() {
     }
   };
 
-  const handleDelete = async (id, type) => {
-    if (!window.confirm("Are you sure you want to delete this record?")) return;
+  const handleDelete = (id, type) => {
+    setDeleteConfirm({ id, type });
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!deleteConfirm) return;
+    const { id, type } = deleteConfirm;
     try {
       const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases' };
 
@@ -1060,6 +1067,7 @@ export default function App() {
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
       if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
       if (type === 'Purchases') setPurchases(purchases.filter(p => p.id !== id));
+      setDeleteConfirm(null);
     } catch (err) {
       alert('Could not delete — ' + (err.message || 'please check your internet connection and try again.'));
     }
@@ -1992,6 +2000,28 @@ export default function App() {
                   <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save Changes</button>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* DELETE CONFIRMATION MODAL — replaces the native window.confirm() dialog */}
+        {deleteConfirm && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[400px] transition-colors">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="bg-red-100 rounded-full p-3 flex-shrink-0">
+                  <Trash2 className="w-5 h-5 text-red-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">Delete this record?</h3>
+                  <p className="text-[var(--text-secondary)] text-sm mt-1">This will permanently remove it{deleteConfirm.type ? ` from ${deleteConfirm.type}` : ''}. This action cannot be undone.</p>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3">
+                <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                <button onClick={confirmDeleteItem} className="px-6 py-2.5 bg-red-600 text-white rounded-xl font-bold text-sm hover:bg-red-700 transition-colors">Delete</button>
+              </div>
             </div>
           </div>
         )}
