@@ -5,7 +5,7 @@ import {
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
-  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download
+  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -62,6 +62,8 @@ const defaultSuppliers = [
 const defaultTransactions = [
   { id: 'TXN-ORD-9021', refId: '#ORD-9021', type: 'Income', amount: 35000, date: '2026-09-07', status: 'Success' },
 ];
+
+const EXPENSE_CATEGORIES = ['Food/Eating', 'Delivery/Transport', 'Rent', 'Utilities', 'Staff/Salary', 'Maintenance', 'Marketing', 'Other'];
 
 const defaultSettings = {
   shopName: 'Satota Electronics',
@@ -180,8 +182,8 @@ const dbMap = {
     },
   },
   transaction: {
-    toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status }),
-    fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status }),
+    toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status, category: t.category || '', note: t.note || '' }),
+    fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '' }),
   },
   settings: {
     toDb: (s) => ({ shop_name: s.shopName, proprietor: s.proprietor, phone: s.phone, address: s.address, currency: s.currency, receipt_policies: s.receiptPolicies }),
@@ -461,6 +463,66 @@ export default function App() {
   const [dueView, setDueView] = useState('customer');
   // Reports tab: which date the daily breakdown is showing
   const [reportDate, setReportDate] = useState(() => new Date().toISOString().split('T')[0]);
+
+  // "Add Previous Due" modal — records an opening balance a customer already owed
+  // before you started using this software, without touching product stock at all.
+  const [showPreviousDueModal, setShowPreviousDueModal] = useState(false);
+  const [previousDueForm, setPreviousDueForm] = useState({ customer: '', customerPhone: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+
+  const handleOpenPreviousDue = (customer) => {
+    setPreviousDueForm({
+      customer: customer ? customer.name : '',
+      customerPhone: customer ? (customer.phone || '') : '',
+      amount: '', note: '', date: new Date().toISOString().split('T')[0]
+    });
+    setShowPreviousDueModal(true);
+  };
+
+  const handleSavePreviousDue = async (e) => {
+    e.preventDefault();
+    const amount = parseFloat(previousDueForm.amount) || 0;
+    if (!previousDueForm.customer.trim()) return alert('Please enter a customer name.');
+    if (amount <= 0) return alert('Please enter a due amount greater than 0.');
+
+    try {
+      const orderId = `#DUE-${Math.floor(1000 + Math.random() * 9000)}`;
+      const saleRecord = {
+        id: orderId,
+        customer: previousDueForm.customer.trim(),
+        customerPhone: previousDueForm.customerPhone || '',
+        customerAddress: '',
+        items: [{
+          productId: null,
+          productName: previousDueForm.note?.trim() || 'Previous Due (Opening Balance)',
+          qty: 1, buyPrice: 0, originalPrice: amount, sellPrice: amount, lineDiscount: 0, lineTotal: amount
+        }],
+        subtotal: amount, discount: 0, totalSellAmount: amount, totalCostAmount: 0,
+        status: 'Due', paidAmount: 0,
+        date: previousDueForm.date || new Date().toISOString().split('T')[0],
+      };
+
+      const { error } = await supabase.from('sales').insert(dbMap.sale.toDb(saleRecord));
+      if (error) throw error;
+      setSales(prev => [saleRecord, ...prev]);
+
+      // Auto-add this customer if they aren't already on file
+      const alreadyExists = customers.some(c =>
+        (saleRecord.customerPhone && c.phone && c.phone === saleRecord.customerPhone) ||
+        (!saleRecord.customerPhone && (c.name || '').toLowerCase() === saleRecord.customer.toLowerCase())
+      );
+      if (!alreadyExists) {
+        const { data, error: custError } = await supabase.from('customers')
+          .insert(dbMap.customer.toDb({ name: saleRecord.customer, email: '', phone: saleRecord.customerPhone, address: '' }))
+          .select().single();
+        if (!custError && data) setCustomers(prev => [...prev, dbMap.customer.fromDb(data)]);
+      }
+
+      setShowPreviousDueModal(false);
+      alert('Previous due recorded — it now shows on the Due Amounts page for this customer.');
+    } catch (err) {
+      alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -953,6 +1015,32 @@ export default function App() {
           if (error) throw error;
           setTransactions([newTxn, ...transactions]);
         }
+      } else if (activeTab === 'Expenses') {
+        if (!formData.category) return alert('Please choose an expense category.');
+        const amount = parseFloat(formData.amount) || 0;
+        if (amount <= 0) return alert('Please enter an amount greater than 0.');
+
+        if (editingItem) {
+          const updated = {
+            ...editingItem, type: 'Expense', amount,
+            category: formData.category, note: formData.note || '',
+            date: formData.date || editingItem.date,
+          };
+          const { error } = await supabase.from('transactions').update(dbMap.transaction.toDb(updated)).eq('id', editingItem.id);
+          if (error) throw error;
+          setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
+        } else {
+          const newExpense = {
+            id: `TXN-${Math.floor(1000 + Math.random() * 9000)}`,
+            type: 'Expense', amount,
+            category: formData.category, note: formData.note || '',
+            status: 'Success',
+            date: formData.date || new Date().toISOString().split('T')[0],
+          };
+          const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newExpense));
+          if (error) throw error;
+          setTransactions([newExpense, ...transactions]);
+        }
       }
 
       setFormData({});
@@ -1018,7 +1106,7 @@ export default function App() {
     if (!deleteConfirm) return;
     const { id, type } = deleteConfirm;
     try {
-      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases' };
+      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Expenses: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases' };
 
       if (type === 'Sales') {
         // Put the sold quantities back into inventory before removing the sale record.
@@ -1067,6 +1155,7 @@ export default function App() {
       if (type === 'Customers') setCustomers(customers.filter(c => c.id !== id));
       if (type === 'Suppliers') setSuppliers(suppliers.filter(s => s.id !== id));
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
+      if (type === 'Expenses') setTransactions(transactions.filter(t => t.id !== id));
       if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
       if (type === 'Purchases') setPurchases(purchases.filter(p => p.id !== id));
       setDeleteConfirm(null);
@@ -1253,8 +1342,8 @@ export default function App() {
   };
 
   const handleExportDailyReportCSV = () => {
-    const headers = ['Date', 'Sales Count', 'Sales Total', 'Sales Collected', 'Sales Due', 'COGS', 'Profit', 'Purchases Count', 'Purchases Total', 'Purchases Paid', 'Purchases Due'];
-    const rows = [...last14DaysStats].reverse().map(d => [d.date, d.salesCount, d.salesTotal, d.salesCollected, d.salesDue, d.cogs, d.profit, d.purchasesCount, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
+    const headers = ['Date', 'Sales Paid', 'Sales With Due', 'Sales Total', 'Sales Due', 'COGS', 'Gross Profit', 'Expenses', 'Net Profit', 'Purchases Total', 'Purchases Paid', 'Purchases Due'];
+    const rows = [...last14DaysStats].reverse().map(d => [d.date, d.salesPaidTotal, d.salesWithDueTotal, d.salesTotal, d.salesDue, d.cogs, d.grossProfit, d.expensesTotal, d.netProfit, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
     const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -1280,16 +1369,32 @@ export default function App() {
   // --- Daily Report: sales, purchases, and profit grouped by calendar day ---
   const dailyStatsFor = (dateStr) => {
     const daySales = sales.filter(s => s.date === dateStr);
+    const salesFullyPaid = daySales.filter(s => s.status === 'Paid');
+    const salesWithDue = daySales.filter(s => s.status !== 'Paid'); // Due or Partial
+
     const dayPurchases = purchases.filter(p => p.date === dateStr);
+    const dayExpenses = transactions.filter(t => t.type === 'Expense' && t.date === dateStr);
+
     const salesTotal = daySales.reduce((sum, s) => sum + s.totalSellAmount, 0);
     const salesCollected = daySales.reduce((sum, s) => sum + (s.paidAmount ?? s.totalSellAmount), 0);
+    const salesPaidTotal = salesFullyPaid.reduce((sum, s) => sum + s.totalSellAmount, 0);
+    const salesWithDueTotal = salesWithDue.reduce((sum, s) => sum + s.totalSellAmount, 0);
+
     const cogs = daySales.reduce((sum, s) => sum + s.totalCostAmount, 0);
     const purchasesTotal = dayPurchases.reduce((sum, p) => sum + p.totalAmount, 0);
     const purchasesPaid = dayPurchases.reduce((sum, p) => sum + p.paidAmount, 0);
+    const expensesTotal = dayExpenses.reduce((sum, t) => sum + t.amount, 0);
+
+    const grossProfit = salesTotal - cogs;
+    const netProfit = grossProfit - expensesTotal;
+
     return {
       date: dateStr,
       salesCount: daySales.length, salesTotal, salesCollected, salesDue: Math.max(0, salesTotal - salesCollected),
-      cogs, profit: salesTotal - cogs,
+      salesPaidCount: salesFullyPaid.length, salesPaidTotal,
+      salesWithDueCount: salesWithDue.length, salesWithDueTotal,
+      cogs, profit: grossProfit, grossProfit,
+      expensesCount: dayExpenses.length, expensesTotal, netProfit,
       purchasesCount: dayPurchases.length, purchasesTotal, purchasesPaid, purchasesDue: Math.max(0, purchasesTotal - purchasesPaid),
     };
   };
@@ -1300,6 +1405,22 @@ export default function App() {
     d.setDate(d.getDate() - i);
     return dailyStatsFor(d.toISOString().split('T')[0]);
   });
+
+  // --- Expenses: transactions of type 'Expense', with category breakdown ---
+  const expenseTransactions = transactions
+    .filter(t => t.type === 'Expense')
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const totalExpensesAllTime = expenseTransactions.reduce((sum, t) => sum + t.amount, 0);
+  const todayStr = new Date().toISOString().split('T')[0];
+  const totalExpensesToday = expenseTransactions.filter(t => t.date === todayStr).reduce((sum, t) => sum + t.amount, 0);
+  const thisMonthPrefix = todayStr.slice(0, 7); // YYYY-MM
+  const totalExpensesThisMonth = expenseTransactions.filter(t => t.date.startsWith(thisMonthPrefix)).reduce((sum, t) => sum + t.amount, 0);
+  const expensesByCategory = expenseTransactions.reduce((acc, t) => {
+    const cat = t.category || 'Other';
+    acc[cat] = (acc[cat] || 0) + t.amount;
+    return acc;
+  }, {});
+  const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
 
   // --- Due Amounts: customer dues come from sales that aren't fully paid,
   // vendor dues come from purchases that aren't fully paid to the supplier. ---
@@ -1357,6 +1478,11 @@ export default function App() {
   const filteredGenericRows = (list) => (list || []).filter(item =>
     !currentSearch || Object.values(item).some(v => String(v).toLowerCase().includes(currentSearch))
   );
+  const filteredExpenses = expenseTransactions.filter(t =>
+    !currentSearch ||
+    (t.category || '').toLowerCase().includes(currentSearch) ||
+    (t.note || '').toLowerCase().includes(currentSearch)
+  );
 
   // --- Dashboard insights ---
   const bestSellers = (() => {
@@ -1379,6 +1505,7 @@ export default function App() {
     { name: 'Damaged', icon: AlertTriangle },
     { name: 'Customers', icon: Users },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
+    { name: 'Expenses', icon: Receipt },
     { name: 'Due Amounts', icon: Wallet },
     { name: 'Reports', icon: PieChart }, { name: 'Settings', icon: Settings }
   ];
@@ -1564,7 +1691,7 @@ export default function App() {
                 </select>
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -1575,7 +1702,15 @@ export default function App() {
                 />
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions'].includes(activeTab) && (
+            {activeTab === 'Customers' && (
+              <button
+                onClick={() => handleOpenPreviousDue(null)}
+                className="bg-white border-2 border-orange-500 text-orange-600 text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-50 shadow-sm transition-all"
+              >
+                <Wallet className="w-5 h-5" /> Add Previous Due
+              </button>
+            )}
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses'].includes(activeTab) && (
               <button 
                 onClick={handleOpenAdd}
                 className="bg-orange-500 text-white text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-600 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5"
@@ -2019,6 +2154,18 @@ export default function App() {
                       <option value="Expense">Expense</option>
                     </select>
                     <input required name="amount" type="number" step="0.01" defaultValue={formData.amount || ''} placeholder="Amount (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                  </>
+                )}
+
+                {activeTab === 'Expenses' && (
+                  <>
+                    <select required name="category" defaultValue={formData.category || ''} onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                      <option value="">Select Expense Category...</option>
+                      {EXPENSE_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    </select>
+                    <input required name="amount" type="number" step="0.01" defaultValue={formData.amount || ''} placeholder="Amount (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="date" type="date" defaultValue={formData.date || new Date().toISOString().split('T')[0]} onChange={handleInputChange} max={new Date().toISOString().split('T')[0]} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="note" defaultValue={formData.note || ''} placeholder="Note (optional — e.g. 'lunch for staff')" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                   </>
                 )}
 
@@ -2731,6 +2878,75 @@ export default function App() {
           </div>
         )}
 
+        {/* EXPENSES TAB */}
+        {activeTab === 'Expenses' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Today's Expenses</p>
+                <p className="text-2xl font-bold text-red-600">Tk {totalExpensesToday.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">This Month</p>
+                <p className="text-2xl font-bold text-red-600">Tk {totalExpensesThisMonth.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">All Time</p>
+                <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {totalExpensesAllTime.toLocaleString()}</p>
+              </div>
+            </div>
+
+            {Object.keys(expensesByCategory).length > 0 && (
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
+                <p className="text-sm font-bold text-[var(--text-secondary)] mb-3">By Category</p>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(expensesByCategory)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([cat, amt]) => (
+                      <span key={cat} className="px-3 py-1.5 rounded-full text-xs font-bold bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-card)]">
+                        {cat}: <span className="text-red-600">Tk {amt.toLocaleString()}</span>
+                      </span>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              {filteredExpenses.length === 0 ? (
+                <EmptyState
+                  icon={Receipt}
+                  title={expenseTransactions.length === 0 ? 'No expenses logged yet' : 'No matching expenses'}
+                  message={expenseTransactions.length === 0 ? "Click 'Add New Expense' to log your first one." : 'Try a different search term.'}
+                />
+              ) : (
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                      <th className="pb-3">CATEGORY</th><th className="pb-3">AMOUNT</th><th className="pb-3">DATE</th><th className="pb-3">NOTE</th><th className="pb-3 text-right">ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-card)]">
+                    {filteredExpenses.map(t => (
+                      <tr key={t.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                        <td className="py-4">
+                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-card)]">{t.category || 'Other'}</span>
+                        </td>
+                        <td className="py-4 font-bold text-red-600">Tk {t.amount.toLocaleString()}</td>
+                        <td className="py-4 text-[var(--text-muted)]">{t.date}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">{t.note || '—'}</td>
+                        <td className="py-4 text-right flex justify-end gap-1">
+                          <button onClick={() => handleOpenEdit(t)} title="Edit Expense" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Expense" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* REPORTS TAB */}
         {activeTab === 'Reports' && (
           <div className="space-y-6">
@@ -2745,7 +2961,7 @@ export default function App() {
                 <p className="text-2xl font-bold text-orange-600">Tk {totalSellAmount.toLocaleString()}</p>
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
-                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Net Profit / Loss</p>
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Gross Profit (before expenses)</p>
                 <p className={`text-2xl font-bold flex items-center gap-2 ${netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                   {netProfit >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
                   Tk {Math.abs(netProfit).toLocaleString()}
@@ -2754,6 +2970,17 @@ export default function App() {
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Total Inventory Assets</p>
                 <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {currentInventoryValue.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Total Other Expenses</p>
+                <p className="text-2xl font-bold text-red-500">Tk {totalExpensesAllTime.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors lg:col-span-2">
+                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Net Profit (after expenses) — Your Real Take-Home</p>
+                <p className={`text-2xl font-bold flex items-center gap-2 ${netProfitAfterExpenses >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {netProfitAfterExpenses >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
+                  Tk {Math.abs(netProfitAfterExpenses).toLocaleString()}
+                </p>
               </div>
             </div>
 
@@ -2781,11 +3008,19 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+                <div className="bg-emerald-500/10 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-emerald-700 mb-1">Sales — Fully Paid ({selectedDayStats.salesPaidCount})</p>
+                  <p className="text-lg font-black text-emerald-700">Tk {selectedDayStats.salesPaidTotal.toLocaleString()}</p>
+                </div>
+                <div className="bg-amber-500/10 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-amber-700 mb-1">Sales — With Due ({selectedDayStats.salesWithDueCount})</p>
+                  <p className="text-lg font-black text-amber-700">Tk {selectedDayStats.salesWithDueTotal.toLocaleString()}</p>
+                  {selectedDayStats.salesDue > 0 && <p className="text-[11px] text-amber-600 font-semibold mt-0.5">Tk {selectedDayStats.salesDue.toLocaleString()} still uncollected</p>}
+                </div>
                 <div className="bg-[var(--bg-hover)] rounded-xl p-4">
-                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Sales ({selectedDayStats.salesCount})</p>
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Total Sales ({selectedDayStats.salesCount})</p>
                   <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.salesTotal.toLocaleString()}</p>
-                  {selectedDayStats.salesDue > 0 && <p className="text-[11px] text-red-500 font-semibold mt-0.5">Tk {selectedDayStats.salesDue.toLocaleString()} due</p>}
                 </div>
                 <div className="bg-[var(--bg-hover)] rounded-xl p-4">
                   <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Purchases ({selectedDayStats.purchasesCount})</p>
@@ -2793,14 +3028,14 @@ export default function App() {
                   {selectedDayStats.purchasesDue > 0 && <p className="text-[11px] text-red-500 font-semibold mt-0.5">Tk {selectedDayStats.purchasesDue.toLocaleString()} due</p>}
                 </div>
                 <div className="bg-[var(--bg-hover)] rounded-xl p-4">
-                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Cost of Goods Sold</p>
-                  <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.cogs.toLocaleString()}</p>
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Other Expenses ({selectedDayStats.expensesCount})</p>
+                  <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.expensesTotal.toLocaleString()}</p>
                 </div>
                 <div className="bg-[var(--bg-hover)] rounded-xl p-4">
-                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Profit</p>
-                  <p className={`text-lg font-black flex items-center gap-1 ${selectedDayStats.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {selectedDayStats.profit >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                    Tk {Math.abs(selectedDayStats.profit).toLocaleString()}
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Net Profit (after expenses)</p>
+                  <p className={`text-lg font-black flex items-center gap-1 ${selectedDayStats.netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {selectedDayStats.netProfit >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                    Tk {Math.abs(selectedDayStats.netProfit).toLocaleString()}
                   </p>
                 </div>
               </div>
@@ -2820,10 +3055,11 @@ export default function App() {
                   <thead>
                     <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold text-xs">
                       <th className="pb-2 pr-4">DATE</th>
-                      <th className="pb-2 pr-4">SALES</th>
+                      <th className="pb-2 pr-4">SALES PAID</th>
+                      <th className="pb-2 pr-4">SALES DUE</th>
                       <th className="pb-2 pr-4">PURCHASES</th>
-                      <th className="pb-2 pr-4">COGS</th>
-                      <th className="pb-2">PROFIT</th>
+                      <th className="pb-2 pr-4">EXPENSES</th>
+                      <th className="pb-2">NET PROFIT</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-card)]">
@@ -2834,11 +3070,12 @@ export default function App() {
                         className={`cursor-pointer transition-colors ${d.date === reportDate ? 'bg-orange-500/10' : 'hover:bg-[var(--bg-hover)]'}`}
                       >
                         <td className="py-2.5 pr-4 font-semibold text-[var(--text-primary)]">{d.date}</td>
-                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.salesTotal.toLocaleString()}</td>
+                        <td className="py-2.5 pr-4 text-emerald-700">Tk {d.salesPaidTotal.toLocaleString()}</td>
+                        <td className="py-2.5 pr-4 text-amber-700">Tk {d.salesWithDueTotal.toLocaleString()}</td>
                         <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.purchasesTotal.toLocaleString()}</td>
-                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.cogs.toLocaleString()}</td>
-                        <td className={`py-2.5 font-bold ${d.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                          {d.profit >= 0 ? '+' : '-'}Tk {Math.abs(d.profit).toLocaleString()}
+                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.expensesTotal.toLocaleString()}</td>
+                        <td className={`py-2.5 font-bold ${d.netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {d.netProfit >= 0 ? '+' : '-'}Tk {Math.abs(d.netProfit).toLocaleString()}
                         </td>
                       </tr>
                     ))}
@@ -2953,6 +3190,9 @@ export default function App() {
                       <td key={i} className="py-4 font-medium text-[var(--text-secondary)]">{typeof val === 'object' ? JSON.stringify(val) : val}</td>
                     ))}
                     <td className="py-4 text-right flex justify-end gap-1">
+                      {activeTab === 'Customers' && (
+                        <button onClick={() => handleOpenPreviousDue(item)} title="Add Previous Due" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Wallet className="w-4 h-4" /></button>
+                      )}
                       <button onClick={() => handleOpenEdit(item)} title="Edit Entry" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(item.id, activeTab)} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
