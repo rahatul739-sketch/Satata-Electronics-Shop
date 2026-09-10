@@ -181,6 +181,12 @@ const dbMap = {
       };
     },
   },
+  previousDue: {
+    // A customer's opening balance / old due — deliberately NOT a sale, so it never
+    // shows up in the Sales list, never gets an invoice, and never inflates revenue.
+    toDb: (d) => ({ customer_name: d.customer, customer_phone: d.customerPhone || null, amount: d.amount, note: d.note || null, due_date: d.date }),
+    fromDb: (r) => ({ id: r.id, customer: r.customer_name, customerPhone: r.customer_phone || '', amount: Number(r.amount), note: r.note || '', date: r.due_date }),
+  },
   transaction: {
     toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status, category: t.category || '', note: t.note || '' }),
     fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '' }),
@@ -356,6 +362,7 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [damagedProducts, setDamagedProducts] = useState([]);
   const [purchases, setPurchases] = useState([]);
+  const [previousDues, setPreviousDues] = useState([]);
   const [shopSettings, setShopSettings] = useState(defaultSettings);
 
   useEffect(() => {
@@ -370,7 +377,7 @@ export default function App() {
   const loadAllData = async () => {
     setDataLoading(true);
     try {
-      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes, purchaseRes] = await Promise.all([
+      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes, purchaseRes, prevDueRes] = await Promise.all([
         supabase.from('categories').select('*').order('id'),
         supabase.from('products').select('*').order('id'),
         supabase.from('customers').select('*').order('id'),
@@ -380,6 +387,7 @@ export default function App() {
         supabase.from('shop_settings').select('*').maybeSingle(),
         supabase.from('damaged_products').select('*').order('created_at', { ascending: false }),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
+        supabase.from('customer_previous_dues').select('*').order('created_at', { ascending: false }),
       ]);
 
       setCategories((catRes.data || []).map(dbMap.category.fromDb));
@@ -390,6 +398,7 @@ export default function App() {
       setTransactions((txnRes.data || []).map(dbMap.transaction.fromDb));
       setDamagedProducts((damagedRes.data || []).map(dbMap.damaged.fromDb));
       setPurchases((purchaseRes.data || []).map(dbMap.purchase.fromDb));
+      setPreviousDues((prevDueRes.data || []).map(dbMap.previousDue.fromDb));
 
       if (settingsRes.data) {
         setShopSettings({ ...defaultSettings, ...dbMap.settings.fromDb(settingsRes.data) });
@@ -485,36 +494,28 @@ export default function App() {
     if (amount <= 0) return alert('Please enter a due amount greater than 0.');
 
     try {
-      const orderId = `#DUE-${Math.floor(1000 + Math.random() * 9000)}`;
-      const saleRecord = {
-        id: orderId,
+      const record = {
         customer: previousDueForm.customer.trim(),
         customerPhone: previousDueForm.customerPhone || '',
-        customerAddress: '',
-        items: [{
-          productId: null,
-          productName: previousDueForm.note?.trim() || 'Previous Due (Opening Balance)',
-          qty: 1, buyPrice: 0, originalPrice: amount, sellPrice: amount, lineDiscount: 0, lineTotal: amount
-        }],
-        subtotal: amount, discount: 0, totalSellAmount: amount, totalCostAmount: 0,
-        status: 'Due', paidAmount: 0,
+        amount,
+        note: previousDueForm.note?.trim() || '',
         date: previousDueForm.date || new Date().toISOString().split('T')[0],
       };
 
-      const { error } = await supabase.from('sales').insert(dbMap.sale.toDb(saleRecord));
+      const { data, error } = await supabase.from('customer_previous_dues').insert(dbMap.previousDue.toDb(record)).select().single();
       if (error) throw error;
-      setSales(prev => [saleRecord, ...prev]);
+      setPreviousDues(prev => [dbMap.previousDue.fromDb(data), ...prev]);
 
       // Auto-add this customer if they aren't already on file
       const alreadyExists = customers.some(c =>
-        (saleRecord.customerPhone && c.phone && c.phone === saleRecord.customerPhone) ||
-        (!saleRecord.customerPhone && (c.name || '').toLowerCase() === saleRecord.customer.toLowerCase())
+        (record.customerPhone && c.phone && c.phone === record.customerPhone) ||
+        (!record.customerPhone && (c.name || '').toLowerCase() === record.customer.toLowerCase())
       );
       if (!alreadyExists) {
-        const { data, error: custError } = await supabase.from('customers')
-          .insert(dbMap.customer.toDb({ name: saleRecord.customer, email: '', phone: saleRecord.customerPhone, address: '' }))
+        const { data: custData, error: custError } = await supabase.from('customers')
+          .insert(dbMap.customer.toDb({ name: record.customer, email: '', phone: record.customerPhone, address: '' }))
           .select().single();
-        if (!custError && data) setCustomers(prev => [...prev, dbMap.customer.fromDb(data)]);
+        if (!custError && custData) setCustomers(prev => [...prev, dbMap.customer.fromDb(custData)]);
       }
 
       setShowPreviousDueModal(false);
@@ -526,6 +527,17 @@ export default function App() {
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleSettlePreviousDue = async (id) => {
+    if (!window.confirm('Mark this previous due as fully paid and remove it from the list?')) return;
+    try {
+      const { error } = await supabase.from('customer_previous_dues').delete().eq('id', id);
+      if (error) throw error;
+      setPreviousDues(prev => prev.filter(d => d.id !== id));
+    } catch (err) {
+      alert('Could not update — ' + (err.message || 'please check your internet connection and try again.'));
+    }
   };
 
   const handleSettingsChange = (e) => {
@@ -1422,17 +1434,31 @@ export default function App() {
   }, {});
   const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
 
-  // --- Due Amounts: customer dues come from sales that aren't fully paid,
-  // vendor dues come from purchases that aren't fully paid to the supplier. ---
-  const customerDues = sales
+  // --- Due Amounts: customer dues come from sales that aren't fully paid, PLUS any
+  // manually-recorded previous dues (opening balances). Vendor dues come from
+  // purchases that aren't fully paid to the supplier. A due only "counts" once it's
+  // over Tk 1, so tiny rounding leftovers don't show up as due amounts. ---
+  const salesDues = sales
     .map(s => ({ ...s, dueAmount: Math.max(0, s.totalSellAmount - (s.paidAmount ?? (s.status === 'Paid' ? s.totalSellAmount : 0))) }))
-    .filter(s => s.dueAmount > 0)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
+    .filter(s => s.dueAmount > 1);
+  const previousDueEntries = previousDues.map(pd => ({
+    id: `PDUE-${pd.id}`,
+    rawId: pd.id,
+    customer: pd.customer,
+    customerPhone: pd.customerPhone,
+    totalSellAmount: pd.amount,
+    paidAmount: 0,
+    dueAmount: pd.amount,
+    date: pd.date,
+    note: pd.note,
+    isPreviousDue: true,
+  }));
+  const customerDues = [...salesDues, ...previousDueEntries].sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalCustomerDue = customerDues.reduce((sum, s) => sum + s.dueAmount, 0);
 
   const vendorDues = purchases
     .map(p => ({ ...p, dueAmount: p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount) }))
-    .filter(p => p.dueAmount > 0)
+    .filter(p => p.dueAmount > 1)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalVendorDue = vendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
 
@@ -1702,7 +1728,7 @@ export default function App() {
                 />
               </div>
             )}
-            {activeTab === 'Customers' && (
+            {activeTab === 'Due Amounts' && (
               <button
                 onClick={() => handleOpenPreviousDue(null)}
                 className="bg-white border-2 border-orange-500 text-orange-600 text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-50 shadow-sm transition-all"
@@ -2178,6 +2204,65 @@ export default function App() {
           </div>
         )}
 
+        {/* ADD PREVIOUS DUE MODAL — records an opening balance for a customer.
+            This is deliberately its own table (not a fake sale), so it never shows up
+            in Sales, never prints as an invoice, and never inflates revenue reports. */}
+        {showPreviousDueModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[440px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Add Previous Due</h3>
+                <button onClick={() => setShowPreviousDueModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+
+              <form onSubmit={handleSavePreviousDue} className="space-y-4 text-sm">
+                <input
+                  required
+                  value={previousDueForm.customer}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customer: e.target.value })}
+                  placeholder="Customer Name"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  value={previousDueForm.customerPhone}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customerPhone: e.target.value })}
+                  placeholder="Customer Phone (optional)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  required
+                  type="number" step="0.01" min="0.01"
+                  value={previousDueForm.amount}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, amount: e.target.value })}
+                  placeholder="Due Amount (Tk)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  value={previousDueForm.note}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, note: e.target.value })}
+                  placeholder="Note (optional — e.g. 'from before using this app')"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  type="date"
+                  value={previousDueForm.date}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, date: e.target.value })}
+                  max={new Date().toISOString().split('T')[0]}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <p className="text-xs text-[var(--text-muted)]">
+                  This won't create a sale or invoice — it just shows up as a due amount on the Due Amounts page.
+                </p>
+
+                <div className="flex justify-end gap-3 pt-2 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setShowPreviousDueModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* MARK AS RECEIVED MODAL — styled to match the Add New Purchase modal instead of a native browser prompt */}
         {receiveModal && (
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
@@ -2288,7 +2373,7 @@ export default function App() {
                 {(() => {
                   const paid = selectedReceipt.paidAmount ?? (selectedReceipt.status === 'Paid' ? selectedReceipt.totalSellAmount : 0);
                   const due = Math.max(0, selectedReceipt.totalSellAmount - paid);
-                  if (due <= 0) return null;
+                  if (due <= 1) return null;
                   return (
                     <>
                       <div className="flex justify-between"><span>Paid</span><span>Tk {paid.toLocaleString()}</span></div>
@@ -2412,7 +2497,7 @@ export default function App() {
                   <div className="flex justify-between text-emerald-700"><span>Paid</span><span>Tk {selectedPurchaseReceipt.paidAmount.toLocaleString()}</span></div>
                   {(() => {
                     const due = selectedPurchaseReceipt.dueAmount ?? Math.max(0, selectedPurchaseReceipt.totalAmount - selectedPurchaseReceipt.paidAmount);
-                    if (due <= 0) return null;
+                    if (due <= 1) return null;
                     return <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>;
                   })()}
                 </div>
@@ -2651,7 +2736,7 @@ export default function App() {
                     <td className="py-4 text-[var(--text-secondary)]">{s.items.length} item(s)</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
                     <td className="py-4">
-                      {due <= 0 ? (
+                      {due <= 1 ? (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${paid.toLocaleString()}`}>
@@ -2706,7 +2791,7 @@ export default function App() {
                     <td className="py-4 text-[var(--text-secondary)]">{totalQty}</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.totalAmount.toLocaleString()}</td>
                     <td className="py-4">
-                      {due <= 0 ? (
+                      {due <= 1 ? (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${p.paidAmount.toLocaleString()}`}>
@@ -2827,7 +2912,13 @@ export default function App() {
                         const paid = s.paidAmount ?? 0;
                         return (
                           <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                            <td className="py-4 font-bold text-orange-600">{s.id}</td>
+                            <td className="py-4 font-bold text-orange-600">
+                              {s.isPreviousDue ? (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Opening Balance</span>
+                                </span>
+                              ) : s.id}
+                            </td>
                             <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
                             <td className="py-4 text-[var(--text-secondary)]">{s.customerPhone || '—'}</td>
                             <td className="py-4 text-[var(--text-secondary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
@@ -2835,8 +2926,14 @@ export default function App() {
                             <td className="py-4 font-black text-red-600">Tk {s.dueAmount.toLocaleString()}</td>
                             <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
                             <td className="py-4 text-right flex justify-end gap-1">
-                              <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                              <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                              {s.isPreviousDue ? (
+                                <button onClick={() => handleSettlePreviousDue(s.rawId)} title="Mark as Paid" className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm transition-all whitespace-nowrap">Mark as Paid</button>
+                              ) : (
+                                <>
+                                  <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                                  <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                                </>
+                              )}
                             </td>
                           </tr>
                         );
@@ -3190,9 +3287,6 @@ export default function App() {
                       <td key={i} className="py-4 font-medium text-[var(--text-secondary)]">{typeof val === 'object' ? JSON.stringify(val) : val}</td>
                     ))}
                     <td className="py-4 text-right flex justify-end gap-1">
-                      {activeTab === 'Customers' && (
-                        <button onClick={() => handleOpenPreviousDue(item)} title="Add Previous Due" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Wallet className="w-4 h-4" /></button>
-                      )}
                       <button onClick={() => handleOpenEdit(item)} title="Edit Entry" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(item.id, activeTab)} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
