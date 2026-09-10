@@ -5,7 +5,7 @@ import {
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
-  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen
+  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -459,6 +459,8 @@ export default function App() {
   const [productCategoryFilter, setProductCategoryFilter] = useState('');
   // Due Amounts tab: which side is showing — customer dues or vendor dues
   const [dueView, setDueView] = useState('customer');
+  // Reports tab: which date the daily breakdown is showing
+  const [reportDate, setReportDate] = useState(() => new Date().toISOString().split('T')[0]);
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -1107,6 +1109,8 @@ export default function App() {
       customers,
       suppliers,
       transactions,
+      purchases,
+      damagedProducts,
       shopSettings
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
@@ -1149,13 +1153,15 @@ export default function App() {
         await Promise.all([
           supabase.from('sales').delete().gte('created_at', '1900-01-01'),
           supabase.from('transactions').delete().gte('created_at', '1900-01-01'),
+          supabase.from('purchases').delete().gte('created_at', '1900-01-01'),
+          supabase.from('damaged_products').delete().gte('created_at', '1900-01-01'),
           supabase.from('products').delete().gte('created_at', '1900-01-01'),
           supabase.from('categories').delete().gte('created_at', '1900-01-01'),
           supabase.from('customers').delete().gte('created_at', '1900-01-01'),
           supabase.from('suppliers').delete().gte('created_at', '1900-01-01'),
         ]);
 
-        let newCategories = [], newProducts = [], newCustomers = [], newSuppliers = [], newSales = [], newTransactions = [];
+        let newCategories = [], newProducts = [], newCustomers = [], newSuppliers = [], newSales = [], newTransactions = [], newPurchases = [], newDamaged = [];
         const productIdMap = {}; // old product id (from the backup file) -> new DB-generated id
 
         if (Array.isArray(data.categories) && data.categories.length) {
@@ -1200,12 +1206,34 @@ export default function App() {
           newTransactions = data.transactions;
         }
 
+        if (Array.isArray(data.purchases) && data.purchases.length) {
+          // Re-point each purchase's line items at the newly generated product ids
+          const remappedPurchases = data.purchases.map(p => ({
+            ...p,
+            items: (p.items || []).map(i => ({ ...i, productId: productIdMap[i.productId] ?? i.productId })),
+          }));
+          const { error } = await supabase.from('purchases').insert(remappedPurchases.map(dbMap.purchase.toDb));
+          if (error) throw error;
+          newPurchases = remappedPurchases;
+        }
+
+        if (Array.isArray(data.damagedProducts) && data.damagedProducts.length) {
+          const remappedDamaged = data.damagedProducts.map(d => ({
+            ...d, productId: productIdMap[d.productId] ?? d.productId,
+          }));
+          const { data: inserted, error } = await supabase.from('damaged_products').insert(remappedDamaged.map(dbMap.damaged.toDb)).select();
+          if (error) throw error;
+          newDamaged = inserted.map(dbMap.damaged.fromDb);
+        }
+
         setCategories(newCategories);
         setProducts(newProducts);
         setCustomers(newCustomers);
         setSuppliers(newSuppliers);
         setSales(newSales);
         setTransactions(newTransactions);
+        setPurchases(newPurchases);
+        setDamagedProducts(newDamaged);
 
         if (data.shopSettings) {
           const merged = { ...defaultSettings, ...data.shopSettings };
@@ -1224,6 +1252,21 @@ export default function App() {
     e.target.value = '';
   };
 
+  const handleExportDailyReportCSV = () => {
+    const headers = ['Date', 'Sales Count', 'Sales Total', 'Sales Collected', 'Sales Due', 'COGS', 'Profit', 'Purchases Count', 'Purchases Total', 'Purchases Paid', 'Purchases Due'];
+    const rows = [...last14DaysStats].reverse().map(d => [d.date, d.salesCount, d.salesTotal, d.salesCollected, d.salesDue, d.cogs, d.profit, d.purchasesCount, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
+    const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(shopSettings.shopName || 'shop').replace(/\s+/g, '_')}_daily_report_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Calculations
   const totalSellAmount = sales.reduce((sum, sale) => sum + sale.totalSellAmount, 0);
   const costOfGoodsSold = sales.reduce((sum, sale) => sum + sale.totalCostAmount, 0);
@@ -1233,6 +1276,30 @@ export default function App() {
 
   // Safe lookup map used by the generic tables instead of eval()
   const genericDataMap = { categories, customers, suppliers, transactions, damaged: damagedProducts, purchases };
+
+  // --- Daily Report: sales, purchases, and profit grouped by calendar day ---
+  const dailyStatsFor = (dateStr) => {
+    const daySales = sales.filter(s => s.date === dateStr);
+    const dayPurchases = purchases.filter(p => p.date === dateStr);
+    const salesTotal = daySales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+    const salesCollected = daySales.reduce((sum, s) => sum + (s.paidAmount ?? s.totalSellAmount), 0);
+    const cogs = daySales.reduce((sum, s) => sum + s.totalCostAmount, 0);
+    const purchasesTotal = dayPurchases.reduce((sum, p) => sum + p.totalAmount, 0);
+    const purchasesPaid = dayPurchases.reduce((sum, p) => sum + p.paidAmount, 0);
+    return {
+      date: dateStr,
+      salesCount: daySales.length, salesTotal, salesCollected, salesDue: Math.max(0, salesTotal - salesCollected),
+      cogs, profit: salesTotal - cogs,
+      purchasesCount: dayPurchases.length, purchasesTotal, purchasesPaid, purchasesDue: Math.max(0, purchasesTotal - purchasesPaid),
+    };
+  };
+  const selectedDayStats = dailyStatsFor(reportDate);
+  // Last 14 calendar days (including today), most recent first, for the trend table
+  const last14DaysStats = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    return dailyStatsFor(d.toISOString().split('T')[0]);
+  });
 
   // --- Due Amounts: customer dues come from sales that aren't fully paid,
   // vendor dues come from purchases that aren't fully paid to the supplier. ---
@@ -2687,6 +2754,96 @@ export default function App() {
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Total Inventory Assets</p>
                 <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {currentInventoryValue.toLocaleString()}</p>
+              </div>
+            </div>
+
+            {/* DAILY REPORT — sales, purchases, and profit for a specific day, plus a 14-day trend */}
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+                <h3 className="text-lg font-extrabold text-[var(--text-primary)] flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-orange-500" /> Daily Report
+                </h3>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={reportDate}
+                    onChange={(e) => setReportDate(e.target.value)}
+                    max={new Date().toISOString().split('T')[0]}
+                    className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setReportDate(new Date().toISOString().split('T')[0])}
+                    className="text-xs font-bold text-orange-600 hover:underline whitespace-nowrap"
+                  >
+                    Today
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4">
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Sales ({selectedDayStats.salesCount})</p>
+                  <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.salesTotal.toLocaleString()}</p>
+                  {selectedDayStats.salesDue > 0 && <p className="text-[11px] text-red-500 font-semibold mt-0.5">Tk {selectedDayStats.salesDue.toLocaleString()} due</p>}
+                </div>
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4">
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Purchases ({selectedDayStats.purchasesCount})</p>
+                  <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.purchasesTotal.toLocaleString()}</p>
+                  {selectedDayStats.purchasesDue > 0 && <p className="text-[11px] text-red-500 font-semibold mt-0.5">Tk {selectedDayStats.purchasesDue.toLocaleString()} due</p>}
+                </div>
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4">
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Cost of Goods Sold</p>
+                  <p className="text-lg font-black text-[var(--text-primary)]">Tk {selectedDayStats.cogs.toLocaleString()}</p>
+                </div>
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4">
+                  <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Profit</p>
+                  <p className={`text-lg font-black flex items-center gap-1 ${selectedDayStats.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {selectedDayStats.profit >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                    Tk {Math.abs(selectedDayStats.profit).toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide">Last 14 Days</p>
+                <button
+                  type="button"
+                  onClick={handleExportDailyReportCSV}
+                  className="flex items-center gap-1.5 text-xs font-bold text-[var(--text-secondary)] hover:text-orange-600 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" /> Export CSV
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold text-xs">
+                      <th className="pb-2 pr-4">DATE</th>
+                      <th className="pb-2 pr-4">SALES</th>
+                      <th className="pb-2 pr-4">PURCHASES</th>
+                      <th className="pb-2 pr-4">COGS</th>
+                      <th className="pb-2">PROFIT</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-card)]">
+                    {last14DaysStats.map(d => (
+                      <tr
+                        key={d.date}
+                        onClick={() => setReportDate(d.date)}
+                        className={`cursor-pointer transition-colors ${d.date === reportDate ? 'bg-orange-500/10' : 'hover:bg-[var(--bg-hover)]'}`}
+                      >
+                        <td className="py-2.5 pr-4 font-semibold text-[var(--text-primary)]">{d.date}</td>
+                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.salesTotal.toLocaleString()}</td>
+                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.purchasesTotal.toLocaleString()}</td>
+                        <td className="py-2.5 pr-4 text-[var(--text-secondary)]">Tk {d.cogs.toLocaleString()}</td>
+                        <td className={`py-2.5 font-bold ${d.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {d.profit >= 0 ? '+' : '-'}Tk {Math.abs(d.profit).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
