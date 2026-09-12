@@ -5,7 +5,7 @@ import {
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
-  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History
+  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History, Boxes, ArrowRightLeft
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -108,8 +108,8 @@ const dbMap = {
     fromDb: (r) => ({ id: r.id, name: r.name, description: r.description, totalItems: r.total_items }),
   },
   product: {
-    toDb: (p) => ({ name: p.name, category: p.category, buy_price: p.buyPrice, sell_price: p.sellPrice, stock: p.stock, reorder_level: p.reorderLevel }),
-    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, buyPrice: Number(r.buy_price), sellPrice: Number(r.sell_price), stock: r.stock, reorderLevel: r.reorder_level }),
+    toDb: (p) => ({ name: p.name, category: p.category, buy_price: p.buyPrice, sell_price: p.sellPrice, stock: p.stock, reorder_level: p.active === false ? 0 : p.reorderLevel, active: p.active !== false, last_sold_at: p.lastSoldAt || null }),
+    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, buyPrice: Number(r.buy_price), sellPrice: Number(r.sell_price), stock: r.stock, reorderLevel: r.reorder_level, active: r.active !== false, lastSoldAt: r.last_sold_at }),
   },
   customer: {
     toDb: (c) => ({ name: c.name, email: c.email, phone: c.phone, address: c.address }),
@@ -181,12 +181,6 @@ const dbMap = {
       };
     },
   },
-  previousDue: {
-    // A customer's opening balance / old due — deliberately NOT a sale, so it never
-    // shows up in the Sales list, never gets an invoice, and never inflates revenue.
-    toDb: (d) => ({ customer_name: d.customer, customer_phone: d.customerPhone || null, amount: d.amount, note: d.note || null, due_date: d.date }),
-    fromDb: (r) => ({ id: r.id, customer: r.customer_name, customerPhone: r.customer_phone || '', amount: Number(r.amount), note: r.note || '', date: r.due_date }),
-  },
   transaction: {
     toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status, category: t.category || '', note: t.note || '' }),
     fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '' }),
@@ -206,6 +200,10 @@ const dbMap = {
       date: r.damage_date, type: r.entry_type || 'Inventory Damage',
       customerName: r.customer_name || '', customerPhone: r.customer_phone || '',
     }),
+  },
+  warehouse: {
+    toDb: (w) => ({ product_id: w.productId || null, product_name: w.productName, category: w.category || '', qty: w.qty }),
+    fromDb: (r) => ({ id: r.id, productId: r.product_id, productName: r.product_name, category: r.category || '', qty: r.qty }),
   },
 };
 
@@ -361,8 +359,8 @@ export default function App() {
   const [suppliers, setSuppliers] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [damagedProducts, setDamagedProducts] = useState([]);
+  const [warehouseStock, setWarehouseStock] = useState([]);
   const [purchases, setPurchases] = useState([]);
-  const [previousDues, setPreviousDues] = useState([]);
   const [shopSettings, setShopSettings] = useState(defaultSettings);
 
   useEffect(() => {
@@ -377,7 +375,7 @@ export default function App() {
   const loadAllData = async () => {
     setDataLoading(true);
     try {
-      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes, purchaseRes, prevDueRes] = await Promise.all([
+      const [catRes, prodRes, custRes, supRes, saleRes, txnRes, settingsRes, damagedRes, purchaseRes, warehouseRes] = await Promise.all([
         supabase.from('categories').select('*').order('id'),
         supabase.from('products').select('*').order('id'),
         supabase.from('customers').select('*').order('id'),
@@ -387,7 +385,8 @@ export default function App() {
         supabase.from('shop_settings').select('*').maybeSingle(),
         supabase.from('damaged_products').select('*').order('created_at', { ascending: false }),
         supabase.from('purchases').select('*').order('created_at', { ascending: false }),
-        supabase.from('customer_previous_dues').select('*').order('created_at', { ascending: false }),
+        Promise.resolve(supabase.from('warehouse_stock').select('*').order('created_at', { ascending: false }))
+          .catch(() => ({ data: [] })),
       ]);
 
       setCategories((catRes.data || []).map(dbMap.category.fromDb));
@@ -398,7 +397,7 @@ export default function App() {
       setTransactions((txnRes.data || []).map(dbMap.transaction.fromDb));
       setDamagedProducts((damagedRes.data || []).map(dbMap.damaged.fromDb));
       setPurchases((purchaseRes.data || []).map(dbMap.purchase.fromDb));
-      setPreviousDues((prevDueRes.data || []).map(dbMap.previousDue.fromDb));
+      setWarehouseStock((warehouseRes.data || []).map(dbMap.warehouse.fromDb));
 
       if (settingsRes.data) {
         setShopSettings({ ...defaultSettings, ...dbMap.settings.fromDb(settingsRes.data) });
@@ -429,6 +428,7 @@ export default function App() {
 
   // Theme (Dark Mode)
   const [isDarkMode, setIsDarkMode] = useLocalStorage('satota_theme_dark', false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   // Search / filter text, kept per-tab so switching tabs doesn't lose your search
   const [searchQueries, setSearchQueries] = useState({});
@@ -470,6 +470,9 @@ export default function App() {
   const [productCategoryFilter, setProductCategoryFilter] = useState('');
   // Due Amounts tab: which side is showing — customer dues or vendor dues
   const [dueView, setDueView] = useState('customer');
+  const [dueDateFrom, setDueDateFrom] = useState('');
+  const [dueDateTo, setDueDateTo] = useState('');
+  const [duePartyFilter, setDuePartyFilter] = useState('');
   // Reports tab: which date the daily breakdown is showing
   const [reportDate, setReportDate] = useState(() => new Date().toISOString().split('T')[0]);
 
@@ -494,28 +497,36 @@ export default function App() {
     if (amount <= 0) return alert('Please enter a due amount greater than 0.');
 
     try {
-      const record = {
+      const orderId = nextSequentialId(sales.map(s => s.id), '#DUE-');
+      const saleRecord = {
+        id: orderId,
         customer: previousDueForm.customer.trim(),
         customerPhone: previousDueForm.customerPhone || '',
-        amount,
-        note: previousDueForm.note?.trim() || '',
+        customerAddress: '',
+        items: [{
+          productId: null,
+          productName: previousDueForm.note?.trim() || 'Previous Due (Opening Balance)',
+          qty: 1, buyPrice: 0, originalPrice: amount, sellPrice: amount, lineDiscount: 0, lineTotal: amount
+        }],
+        subtotal: amount, discount: 0, totalSellAmount: amount, totalCostAmount: 0,
+        status: 'Due', paidAmount: 0,
         date: previousDueForm.date || new Date().toISOString().split('T')[0],
       };
 
-      const { data, error } = await supabase.from('customer_previous_dues').insert(dbMap.previousDue.toDb(record)).select().single();
+      const { error } = await supabase.from('sales').insert(dbMap.sale.toDb(saleRecord));
       if (error) throw error;
-      setPreviousDues(prev => [dbMap.previousDue.fromDb(data), ...prev]);
+      setSales(prev => [saleRecord, ...prev]);
 
       // Auto-add this customer if they aren't already on file
       const alreadyExists = customers.some(c =>
-        (record.customerPhone && c.phone && c.phone === record.customerPhone) ||
-        (!record.customerPhone && (c.name || '').toLowerCase() === record.customer.toLowerCase())
+        (saleRecord.customerPhone && c.phone && c.phone === saleRecord.customerPhone) ||
+        (!saleRecord.customerPhone && (c.name || '').toLowerCase() === saleRecord.customer.toLowerCase())
       );
       if (!alreadyExists) {
-        const { data: custData, error: custError } = await supabase.from('customers')
-          .insert(dbMap.customer.toDb({ name: record.customer, email: '', phone: record.customerPhone, address: '' }))
+        const { data, error: custError } = await supabase.from('customers')
+          .insert(dbMap.customer.toDb({ name: saleRecord.customer, email: '', phone: saleRecord.customerPhone, address: '' }))
           .select().single();
-        if (!custError && custData) setCustomers(prev => [...prev, dbMap.customer.fromDb(custData)]);
+        if (!custError && data) setCustomers(prev => [...prev, dbMap.customer.fromDb(data)]);
       }
 
       setShowPreviousDueModal(false);
@@ -527,17 +538,6 @@ export default function App() {
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
-  };
-
-  const handleSettlePreviousDue = async (id) => {
-    if (!window.confirm('Mark this previous due as fully paid and remove it from the list?')) return;
-    try {
-      const { error } = await supabase.from('customer_previous_dues').delete().eq('id', id);
-      if (error) throw error;
-      setPreviousDues(prev => prev.filter(d => d.id !== id));
-    } catch (err) {
-      alert('Could not update — ' + (err.message || 'please check your internet connection and try again.'));
-    }
   };
 
   const handleSettingsChange = (e) => {
@@ -662,20 +662,33 @@ export default function App() {
   };
 
   // Save Item Handler
+  // Generates the next sequential id for a given prefix, starting at 10001.
+  // Existing records keep whatever id they already have — this only governs new ones.
+  const nextSequentialId = (existingIds, prefix) => {
+    const nums = existingIds
+      .filter(id => id && id.startsWith(prefix))
+      .map(id => parseInt(id.slice(prefix.length).replace(/\D/g, ''), 10))
+      .filter(n => !isNaN(n));
+    const next = nums.length > 0 ? Math.max(...nums) + 1 : 10001;
+    return `${prefix}${next}`;
+  };
+
   const handleSaveItem = async (e) => {
     e.preventDefault();
 
     try {
       if (activeTab === 'Products') {
         const newStock = parseInt(formData.stock, 10) || 0;
-        const reorderLevel = parseInt(formData.reorderLevel, 10) || 5;
+        const active = formData.active !== false;
+        const reorderLevel = active ? (parseInt(formData.reorderLevel, 10) || 5) : 0;
         const productData = {
           name: formData.name,
           category: formData.category,
           buyPrice: parseFloat(formData.buyPrice) || 0,
           sellPrice: parseFloat(formData.sellPrice) || 0,
           stock: newStock,
-          reorderLevel,
+          reorderLevel, active,
+          lastSoldAt: formData.lastSoldAt || null,
         };
 
         if (editingItem) {
@@ -704,17 +717,34 @@ export default function App() {
         let totalCostAmount = 0;
         let totalLineDiscount = 0;
 
+        const isCombo = !!formData.isCombo;
+        const comboPrice = parseFloat(formData.comboPrice) || 0;
+        if (isCombo && comboPrice <= 0) return alert('Please enter the combo total price.');
+
+        // First pass: validate stock and, for combo sales, work out each item's
+        // share of the one combo price (weighted by its normal catalog price).
+        const rawItems = [];
+        let totalCatalogWeight = 0;
         for (let item of cartItems) {
           const prod = workingProducts.find(p => p.id === parseInt(item.productId, 10));
           if (!prod) return alert("Please select a valid product for all rows.");
           const qty = parseInt(item.qty, 10) || 1;
+          if (qty > prod.stock) return alert(`Not enough stock for ${prod.name}. Available: ${prod.stock}`);
+          const weight = prod.sellPrice * qty;
+          totalCatalogWeight += weight;
+          rawItems.push({ item, prod, qty, weight });
+        }
 
-          if (qty > prod.stock) {
-            return alert(`Not enough stock for ${prod.name}. Available: ${prod.stock}`);
+        for (let { item, prod, qty, weight } of rawItems) {
+          let originalPrice, customPrice;
+          if (isCombo) {
+            originalPrice = prod.sellPrice;
+            const shareOfCombo = totalCatalogWeight > 0 ? (comboPrice * weight / totalCatalogWeight) : (comboPrice / rawItems.length);
+            customPrice = shareOfCombo / qty;
+          } else {
+            originalPrice = parseFloat(item.customProductPrice) || prod.sellPrice;
+            customPrice = parseFloat(item.customSellPrice) || prod.sellPrice;
           }
-
-          const originalPrice = parseFloat(item.customProductPrice) || prod.sellPrice;
-          const customPrice = parseFloat(item.customSellPrice) || prod.sellPrice;
           const lineTotal = customPrice * qty;
           const lineCost = prod.buyPrice * qty;
           const lineDiscount = Math.max(0, originalPrice - customPrice) * qty;
@@ -734,10 +764,15 @@ export default function App() {
             lineTotal: lineTotal
           });
         }
+        if (isCombo) {
+          // Rounding across items can leave a tiny remainder — fold it into the recorded subtotal
+          // so the receipt always shows exactly the combo price the customer agreed to pay.
+          subtotal = comboPrice;
+        }
 
         const discount = parseFloat(formData.discount) || 0;
         const totalSellAmount = subtotal - discount;
-        const orderId = editingItem ? editingItem.id : `#ORD-${Math.floor(1000 + Math.random() * 9000)}`;
+        const orderId = editingItem ? editingItem.id : nextSequentialId(sales.map(s => s.id), '#ORD-');
 
         const saleStatus = formData.status || 'Paid';
         let paidAmount;
@@ -783,9 +818,10 @@ export default function App() {
         }
 
         // Build the list of { productId, newStock } for every product touched by this sale
+        const nowIso = new Date().toISOString();
         const stockUpdates = processedItems.map(item => {
           const prod = workingProducts.find(p => p.id === item.productId);
-          return { productId: item.productId, newStock: Math.max(0, prod.stock - item.qty) };
+          return { productId: item.productId, newStock: Math.max(0, prod.stock - item.qty), lastSoldAt: nowIso };
         });
 
         if (editingItem) {
@@ -797,7 +833,7 @@ export default function App() {
             .eq('ref_id', editingItem.id);
           if (txnError) throw txnError;
 
-          await Promise.all(stockUpdates.map(u => supabase.from('products').update({ stock: u.newStock }).eq('id', u.productId)));
+          await Promise.all(stockUpdates.map(u => supabase.from('products').update({ stock: u.newStock, last_sold_at: u.lastSoldAt }).eq('id', u.productId)));
 
           setSales(sales.map(s => s.id === editingItem.id ? saleRecord : s));
           setTransactions(prev => prev.map(t =>
@@ -807,7 +843,7 @@ export default function App() {
           ));
           setProducts(prev => prev.map(p => {
             const u = stockUpdates.find(s => s.productId === p.id);
-            return u ? { ...p, stock: u.newStock } : p;
+            return u ? { ...p, stock: u.newStock, lastSoldAt: u.lastSoldAt } : p;
           }));
         } else {
           const { error: saleError } = await supabase.from('sales').insert(dbMap.sale.toDb(saleRecord));
@@ -824,12 +860,12 @@ export default function App() {
           const { error: txnError } = await supabase.from('transactions').insert(dbMap.transaction.toDb(autoTransaction));
           if (txnError) throw txnError;
 
-          await Promise.all(stockUpdates.map(u => supabase.from('products').update({ stock: u.newStock }).eq('id', u.productId)));
+          await Promise.all(stockUpdates.map(u => supabase.from('products').update({ stock: u.newStock, last_sold_at: u.lastSoldAt }).eq('id', u.productId)));
 
           setSales([saleRecord, ...sales]);
           setProducts(prev => prev.map(p => {
             const u = stockUpdates.find(s => s.productId === p.id);
-            return u ? { ...p, stock: u.newStock } : p;
+            return u ? { ...p, stock: u.newStock, lastSoldAt: u.lastSoldAt } : p;
           }));
           setTransactions([autoTransaction, ...transactions]);
         }
@@ -846,12 +882,13 @@ export default function App() {
           setCategories([...categories, dbMap.category.fromDb(data)]);
         }
       } else if (activeTab === 'Customers') {
+        const customerData = { ...formData, name: formData.name || 'Walk-in Customer' };
         if (editingItem) {
-          const { error } = await supabase.from('customers').update(dbMap.customer.toDb(formData)).eq('id', editingItem.id);
+          const { error } = await supabase.from('customers').update(dbMap.customer.toDb(customerData)).eq('id', editingItem.id);
           if (error) throw error;
-          setCustomers(customers.map(c => c.id === editingItem.id ? { ...c, ...formData } : c));
+          setCustomers(customers.map(c => c.id === editingItem.id ? { ...c, ...customerData } : c));
         } else {
-          const { data, error } = await supabase.from('customers').insert(dbMap.customer.toDb(formData)).select().single();
+          const { data, error } = await supabase.from('customers').insert(dbMap.customer.toDb(customerData)).select().single();
           if (error) throw error;
           setCustomers([...customers, dbMap.customer.fromDb(data)]);
         }
@@ -952,7 +989,7 @@ export default function App() {
 
         const paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalAmount);
         const status = paidAmount <= 0 ? 'Due' : paidAmount >= totalAmount ? 'Paid' : 'Partial';
-        const purchaseId = editingItem ? editingItem.id : `#PUR-${Math.floor(1000 + Math.random() * 9000)}`;
+        const purchaseId = editingItem ? editingItem.id : nextSequentialId(purchases.map(p => p.id), '#PUR-');
         const fullyReceived = processedItems.every(i => i.receivedQty >= i.qty);
 
         const purchaseRecord = {
@@ -1018,7 +1055,7 @@ export default function App() {
           setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
         } else {
           const newTxn = {
-            id: `TXN-${Math.floor(100 + Math.random() * 900)}`,
+            id: nextSequentialId(transactions.map(t => t.id), 'TXN-'),
             ...formData,
             amount: parseFloat(formData.amount),
             date: new Date().toISOString().split('T')[0]
@@ -1043,7 +1080,7 @@ export default function App() {
           setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
         } else {
           const newExpense = {
-            id: `TXN-${Math.floor(1000 + Math.random() * 9000)}`,
+            id: nextSequentialId(transactions.map(t => t.id), 'TXN-'),
             type: 'Expense', amount,
             category: formData.category, note: formData.note || '',
             status: 'Success',
@@ -1052,6 +1089,26 @@ export default function App() {
           const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newExpense));
           if (error) throw error;
           setTransactions([newExpense, ...transactions]);
+        }
+      } else if (activeTab === 'Warehouse') {
+        const qty = parseInt(formData.qty, 10) || 0;
+        if (qty < 0) return alert('Quantity cannot be negative.');
+        const prod = formData.productId ? products.find(p => p.id === parseInt(formData.productId, 10)) : null;
+        const warehouseData = {
+          productId: prod ? prod.id : null,
+          productName: prod ? prod.name : (formData.productName || 'Unnamed item'),
+          category: prod ? prod.category : (formData.category || ''),
+          qty,
+        };
+
+        if (editingItem) {
+          const { error } = await supabase.from('warehouse_stock').update(dbMap.warehouse.toDb(warehouseData)).eq('id', editingItem.id);
+          if (error) throw error;
+          setWarehouseStock(warehouseStock.map(w => w.id === editingItem.id ? { ...w, ...warehouseData } : w));
+        } else {
+          const { data, error } = await supabase.from('warehouse_stock').insert(dbMap.warehouse.toDb(warehouseData)).select().single();
+          if (error) throw error;
+          setWarehouseStock([dbMap.warehouse.fromDb(data), ...warehouseStock]);
         }
       }
 
@@ -1065,6 +1122,61 @@ export default function App() {
   // Receive some or all of the still-pending quantity for one line item of a purchase.
   // Vendors often deliver in batches, so this asks how many units just arrived (defaulting
   // to the full pending amount) rather than assuming the whole order showed up at once.
+  // Move some or all of a warehouse item's quantity onto the shop floor —
+  // deducts from the warehouse row and adds the same amount to the linked product's stock.
+  // Quick +1/-1 stock adjustment straight from the Products list, no need to open the edit form.
+  const handleAdjustStock = async (product, delta) => {
+    const newStock = Math.max(0, product.stock + delta);
+    if (newStock === product.stock) return;
+    setProducts(products.map(p => p.id === product.id ? { ...p, stock: newStock } : p));
+    try {
+      const { error } = await supabase.from('products').update({ stock: newStock }).eq('id', product.id);
+      if (error) throw error;
+    } catch (err) {
+      setProducts(products.map(p => p.id === product.id ? { ...p, stock: product.stock } : p)); // revert on failure
+      alert('Could not update stock — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
+  const handleTransferToShop = async (warehouseItem) => {
+    const maxQty = warehouseItem.qty;
+    const input = window.prompt(`How many units of "${warehouseItem.productName}" to move to the shop? (Available in warehouse: ${maxQty})`, String(maxQty));
+    if (input === null) return;
+    const transferQty = parseInt(input, 10);
+    if (!transferQty || transferQty <= 0) return alert('Please enter a quantity greater than 0.');
+    if (transferQty > maxQty) return alert(`You only have ${maxQty} units in the warehouse.`);
+
+    try {
+      const remaining = maxQty - transferQty;
+
+      if (remaining <= 0) {
+        const { error } = await supabase.from('warehouse_stock').delete().eq('id', warehouseItem.id);
+        if (error) throw error;
+        setWarehouseStock(warehouseStock.filter(w => w.id !== warehouseItem.id));
+      } else {
+        const { error } = await supabase.from('warehouse_stock').update({ qty: remaining }).eq('id', warehouseItem.id);
+        if (error) throw error;
+        setWarehouseStock(warehouseStock.map(w => w.id === warehouseItem.id ? { ...w, qty: remaining } : w));
+      }
+
+      if (warehouseItem.productId) {
+        const prod = products.find(p => p.id === warehouseItem.productId);
+        if (prod) {
+          const newStock = prod.stock + transferQty;
+          const { error: stockError } = await supabase.from('products').update({ stock: newStock }).eq('id', prod.id);
+          if (stockError) throw stockError;
+          setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
+        } else {
+          alert(`Moved ${transferQty} units out of the warehouse, but couldn't find a matching shop product to add them to — you may need to add stock manually.`);
+        }
+      } else {
+        alert(`Moved ${transferQty} units out of the warehouse. This item isn't linked to a shop product, so add it manually on the Products page if needed.`);
+      }
+    } catch (err) {
+      alert('Could not transfer stock — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
   const handleReceivePurchaseItem = (purchase, itemIndex) => {
     const item = purchase.items[itemIndex];
     if (!item) return;
@@ -1118,7 +1230,7 @@ export default function App() {
     if (!deleteConfirm) return;
     const { id, type } = deleteConfirm;
     try {
-      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Expenses: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases' };
+      const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Expenses: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases', Warehouse: 'warehouse_stock' };
 
       if (type === 'Sales') {
         // Put the sold quantities back into inventory before removing the sale record.
@@ -1168,6 +1280,7 @@ export default function App() {
       if (type === 'Suppliers') setSuppliers(suppliers.filter(s => s.id !== id));
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
       if (type === 'Expenses') setTransactions(transactions.filter(t => t.id !== id));
+      if (type === 'Warehouse') setWarehouseStock(warehouseStock.filter(w => w.id !== id));
       if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
       if (type === 'Purchases') setPurchases(purchases.filter(p => p.id !== id));
       setDeleteConfirm(null);
@@ -1353,6 +1466,113 @@ export default function App() {
     e.target.value = '';
   };
 
+  // Merge-import products: matches existing products by name (case-insensitive, same
+  // category), updating their price/stock/etc — everything else in the shop is untouched.
+  const handleMergeImportProducts = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const data = JSON.parse(event.target.result);
+        const incoming = Array.isArray(data) ? data : data.products;
+        if (!Array.isArray(incoming) || incoming.length === 0) {
+          alert('This file does not look like a product list. Expected an array of products, or an object with a "products" array.');
+          return;
+        }
+
+        const existingByKey = {};
+        products.forEach(p => { existingByKey[`${p.name.trim().toLowerCase()}__${(p.category || '').trim().toLowerCase()}`] = p; });
+
+        const toUpdate = [];
+        const toInsert = [];
+        for (const np of incoming) {
+          if (!np.name) continue;
+          const key = `${String(np.name).trim().toLowerCase()}__${String(np.category || '').trim().toLowerCase()}`;
+          const match = existingByKey[key];
+          const productData = {
+            name: np.name,
+            category: np.category || 'Uncategorized',
+            buyPrice: np.buyPrice ?? 0,
+            sellPrice: np.sellPrice ?? 0,
+            stock: np.stock ?? 0,
+            reorderLevel: np.reorderLevel ?? 3,
+            active: np.active !== false,
+          };
+          if (match) toUpdate.push({ id: match.id, productData });
+          else toInsert.push(productData);
+        }
+
+        if (!window.confirm(`This will update ${toUpdate.length} existing product(s) and add ${toInsert.length} new product(s). Everything else in your shop stays untouched. Continue?`)) {
+          return;
+        }
+
+        await Promise.all(toUpdate.map(u => supabase.from('products').update(dbMap.product.toDb(u.productData)).eq('id', u.id)));
+
+        let insertedRows = [];
+        if (toInsert.length > 0) {
+          const { data: inserted, error } = await supabase.from('products').insert(toInsert.map(dbMap.product.toDb)).select();
+          if (error) throw error;
+          insertedRows = inserted.map(dbMap.product.fromDb);
+        }
+
+        setProducts(prev => [
+          ...prev.map(p => {
+            const u = toUpdate.find(x => x.id === p.id);
+            return u ? { ...p, ...u.productData, id: p.id } : p;
+          }),
+          ...insertedRows,
+        ]);
+
+        alert(`Done — ${toUpdate.length} product(s) updated, ${toInsert.length} added.`);
+      } catch (err) {
+        alert('Could not import products — ' + (err.message || 'please check the file and your internet connection.'));
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Bulk-import customers: adds new customers, skips ones that already match by phone or name.
+  const handleImportCustomers = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const data = JSON.parse(event.target.result);
+        const incoming = Array.isArray(data) ? data : data.customers;
+        if (!Array.isArray(incoming) || incoming.length === 0) {
+          alert('This file does not look like a customer list. Expected an array of customers, or an object with a "customers" array.');
+          return;
+        }
+
+        const existingKeys = new Set(customers.map(c => (c.phone || c.name || '').trim().toLowerCase()).filter(Boolean));
+        const toInsert = incoming
+          .filter(c => c.name || c.phone)
+          .filter(c => !existingKeys.has((c.phone || c.name || '').trim().toLowerCase()))
+          .map(c => ({ name: c.name || 'Walk-in Customer', email: c.email || '', phone: c.phone || '', address: c.address || '' }));
+
+        if (toInsert.length === 0) {
+          alert('No new customers to add — everyone in this file already matches an existing customer.');
+          return;
+        }
+        if (!window.confirm(`This will add ${toInsert.length} new customer(s). Continue?`)) return;
+
+        const { data: inserted, error } = await supabase.from('customers').insert(toInsert.map(dbMap.customer.toDb)).select();
+        if (error) throw error;
+        setCustomers(prev => [...prev, ...inserted.map(dbMap.customer.fromDb)]);
+        alert(`Added ${inserted.length} new customer(s).`);
+      } catch (err) {
+        alert('Could not import customers — ' + (err.message || 'please check the file and your internet connection.'));
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const handleExportDailyReportCSV = () => {
     const headers = ['Date', 'Sales Paid', 'Sales With Due', 'Sales Total', 'Sales Due', 'COGS', 'Gross Profit', 'Expenses', 'Net Profit', 'Purchases Total', 'Purchases Paid', 'Purchases Due'];
     const rows = [...last14DaysStats].reverse().map(d => [d.date, d.salesPaidTotal, d.salesWithDueTotal, d.salesTotal, d.salesDue, d.cogs, d.grossProfit, d.expensesTotal, d.netProfit, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
@@ -1373,10 +1593,13 @@ export default function App() {
   const costOfGoodsSold = sales.reduce((sum, sale) => sum + sale.totalCostAmount, 0);
   const netProfit = totalSellAmount - costOfGoodsSold;
   const currentInventoryValue = products.reduce((sum, p) => sum + (p.buyPrice * p.stock), 0);
-  const lowStockProducts = products.filter(p => p.stock <= (p.reorderLevel || 5));
+  const lowStockProducts = products.filter(p => p.active !== false && p.stock <= (p.reorderLevel || 5));
+  const totalProductCount = products.length;
+  const totalStockUnits = products.reduce((sum, p) => sum + (p.stock || 0), 0);
+  const [showLowStock, setShowLowStock] = useState(false);
 
   // Safe lookup map used by the generic tables instead of eval()
-  const genericDataMap = { categories, customers, suppliers, transactions, damaged: damagedProducts, purchases };
+  const genericDataMap = { categories, customers, suppliers, damaged: damagedProducts, purchases };
 
   // --- Daily Report: sales, purchases, and profit grouped by calendar day ---
   const dailyStatsFor = (dateStr) => {
@@ -1434,33 +1657,33 @@ export default function App() {
   }, {});
   const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
 
-  // --- Due Amounts: customer dues come from sales that aren't fully paid, PLUS any
-  // manually-recorded previous dues (opening balances). Vendor dues come from
-  // purchases that aren't fully paid to the supplier. A due only "counts" once it's
-  // over Tk 1, so tiny rounding leftovers don't show up as due amounts. ---
-  const salesDues = sales
+  // --- Due Amounts: customer dues come from sales that aren't fully paid,
+  // vendor dues come from purchases that aren't fully paid to the supplier. ---
+  const customerDues = sales
     .map(s => ({ ...s, dueAmount: Math.max(0, s.totalSellAmount - (s.paidAmount ?? (s.status === 'Paid' ? s.totalSellAmount : 0))) }))
-    .filter(s => s.dueAmount > 1);
-  const previousDueEntries = previousDues.map(pd => ({
-    id: `PDUE-${pd.id}`,
-    rawId: pd.id,
-    customer: pd.customer,
-    customerPhone: pd.customerPhone,
-    totalSellAmount: pd.amount,
-    paidAmount: 0,
-    dueAmount: pd.amount,
-    date: pd.date,
-    note: pd.note,
-    isPreviousDue: true,
-  }));
-  const customerDues = [...salesDues, ...previousDueEntries].sort((a, b) => new Date(b.date) - new Date(a.date));
+    .filter(s => s.dueAmount > 0)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalCustomerDue = customerDues.reduce((sum, s) => sum + s.dueAmount, 0);
 
   const vendorDues = purchases
     .map(p => ({ ...p, dueAmount: p.dueAmount ?? Math.max(0, p.totalAmount - p.paidAmount) }))
-    .filter(p => p.dueAmount > 1)
+    .filter(p => p.dueAmount > 0)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const totalVendorDue = vendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
+
+  // Due Amounts page: apply the date-range + customer/supplier filters on top of the base lists
+  const filteredCustomerDues = customerDues.filter(s =>
+    (!dueDateFrom || s.date >= dueDateFrom) &&
+    (!dueDateTo || s.date <= dueDateTo) &&
+    (!duePartyFilter || s.customer === duePartyFilter)
+  );
+  const filteredVendorDues = vendorDues.filter(p =>
+    (!dueDateFrom || p.date >= dueDateFrom) &&
+    (!dueDateTo || p.date <= dueDateTo) &&
+    (!duePartyFilter || p.supplier === duePartyFilter)
+  );
+  const filteredCustomerDueTotal = filteredCustomerDues.reduce((sum, s) => sum + s.dueAmount, 0);
+  const filteredVendorDueTotal = filteredVendorDues.reduce((sum, p) => sum + p.dueAmount, 0);
 
   // --- Advance Payments: individual line items that are still owed by a supplier —
   // one purchase can have some items fully delivered and others still pending, so this
@@ -1489,25 +1712,56 @@ export default function App() {
     (p.supplier || '').toLowerCase().includes(currentSearch) ||
     purchaseItemsSummary(p).toLowerCase().includes(currentSearch)
   );
-  // Products grouped by category, for the category-wise browsing view
+  // Products grouped by category, for the category-wise browsing view.
+  // Within each category: items sold today surface first (most recent first), then the rest A-Z.
   const productsByCategory = filteredProducts.reduce((acc, p) => {
     const key = p.category || 'Uncategorized';
     (acc[key] = acc[key] || []).push(p);
     return acc;
   }, {});
+  const todayDateStr = new Date().toISOString().split('T')[0];
+  Object.keys(productsByCategory).forEach(key => {
+    productsByCategory[key].sort((a, b) => {
+      const aSoldToday = a.lastSoldAt && a.lastSoldAt.startsWith(todayDateStr);
+      const bSoldToday = b.lastSoldAt && b.lastSoldAt.startsWith(todayDateStr);
+      if (aSoldToday && bSoldToday) return new Date(b.lastSoldAt) - new Date(a.lastSoldAt);
+      if (aSoldToday) return -1;
+      if (bSoldToday) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  });
   const filteredSales = sales.filter(s =>
     !currentSearch ||
     s.id.toLowerCase().includes(currentSearch) ||
     (s.customer || '').toLowerCase().includes(currentSearch) ||
     (s.customerPhone || '').toLowerCase().includes(currentSearch)
   );
-  const filteredGenericRows = (list) => (list || []).filter(item =>
-    !currentSearch || Object.values(item).some(v => String(v).toLowerCase().includes(currentSearch))
+  const totalWarehouseUnits = warehouseStock.reduce((sum, w) => sum + w.qty, 0);
+  const filteredWarehouseStock = warehouseStock.filter(w =>
+    !currentSearch ||
+    (w.productName || '').toLowerCase().includes(currentSearch) ||
+    (w.category || '').toLowerCase().includes(currentSearch)
   );
+
   const filteredExpenses = expenseTransactions.filter(t =>
     !currentSearch ||
     (t.category || '').toLowerCase().includes(currentSearch) ||
     (t.note || '').toLowerCase().includes(currentSearch)
+  );
+  const salesById = sales.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
+  const transactionProfit = (t) => {
+    if (t.type !== 'Income' || !t.refId) return null;
+    const sale = salesById[t.refId];
+    return sale ? sale.totalSellAmount - sale.totalCostAmount : null;
+  };
+  const filteredTransactions = transactions.filter(t =>
+    !currentSearch ||
+    (t.id || '').toLowerCase().includes(currentSearch) ||
+    (t.refId || '').toLowerCase().includes(currentSearch) ||
+    (t.type || '').toLowerCase().includes(currentSearch)
+  );
+  const filteredGenericRows = (list) => (list || []).filter(item =>
+    !currentSearch || Object.values(item).some(v => String(v).toLowerCase().includes(currentSearch))
   );
 
   // --- Dashboard insights ---
@@ -1528,6 +1782,7 @@ export default function App() {
     { name: 'Categories', icon: Layers }, { name: 'Inventory', icon: Warehouse },
     { name: 'Sales', icon: ShoppingCart }, { name: 'Purchases', icon: PackagePlus },
     { name: 'Advance Payments', icon: PackageOpen },
+    { name: 'Warehouse', icon: Boxes },
     { name: 'Damaged', icon: AlertTriangle },
     { name: 'Customers', icon: Users },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
@@ -1637,8 +1892,24 @@ export default function App() {
         }
       `}</style>
 
+      {/* Mobile hamburger toggle — only visible on small screens */}
+      <button
+        onClick={() => setMobileSidebarOpen(true)}
+        className="md:hidden fixed top-4 left-4 z-40 w-10 h-10 rounded-xl bg-[var(--bg-sidebar)] text-white flex items-center justify-center shadow-lg no-print"
+      >
+        <Layers className="w-5 h-5" />
+      </button>
+
+      {/* Backdrop behind the mobile sidebar drawer */}
+      {mobileSidebarOpen && (
+        <div className="md:hidden fixed inset-0 bg-black/50 z-40 no-print" onClick={() => setMobileSidebarOpen(false)} />
+      )}
+
       {/* Sidebar Navigation */}
-      <aside className="w-72 bg-[var(--bg-sidebar)] text-white flex flex-col p-6 shrink-0 no-print transition-colors duration-300">
+      <aside className={`w-72 bg-[var(--bg-sidebar)] text-white flex flex-col p-6 shrink-0 no-print transition-transform duration-300 fixed md:static inset-y-0 left-0 z-50 md:translate-x-0 ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'} overflow-y-auto`}>
+        <button onClick={() => setMobileSidebarOpen(false)} className="md:hidden self-end text-slate-400 hover:text-white mb-2">
+          <X className="w-5 h-5" />
+        </button>
         <div className="flex items-center gap-3 mb-8">
           <div className="w-11 h-11 bg-gradient-to-br from-orange-400 to-orange-600 text-white rounded-xl flex items-center justify-center font-black text-2xl shadow-lg shadow-orange-900/30">
             {(shopSettings.shopName || 'S').charAt(0)}
@@ -1655,7 +1926,7 @@ export default function App() {
             return (
               <button
                 key={item.name}
-                onClick={() => { setActiveTab(item.name); setShowModal(false); }}
+                onClick={() => { setActiveTab(item.name); setShowModal(false); setMobileSidebarOpen(false); }}
                 className={`relative w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
                   isActive ? 'bg-orange-500 text-white font-bold shadow-md shadow-orange-900/30' : 'text-slate-400 hover:bg-white/5 hover:text-white'
                 }`}
@@ -1697,7 +1968,7 @@ export default function App() {
       </aside>
 
       {/* Main Content Workspace */}
-      <main key={activeTab} className="tab-enter flex-1 p-8 overflow-y-auto">
+      <main key={activeTab} className="tab-enter flex-1 p-4 pt-16 md:p-8 md:pt-8 overflow-y-auto w-full">
         <div className="flex justify-between items-center mb-8 no-print gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl font-black text-[var(--text-primary)]">{activeTab}</h1>
@@ -1717,7 +1988,7 @@ export default function App() {
                 </select>
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses', 'Warehouse'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -1728,7 +1999,7 @@ export default function App() {
                 />
               </div>
             )}
-            {activeTab === 'Due Amounts' && (
+            {activeTab === 'Customers' && (
               <button
                 onClick={() => handleOpenPreviousDue(null)}
                 className="bg-white border-2 border-orange-500 text-orange-600 text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-50 shadow-sm transition-all"
@@ -1736,36 +2007,59 @@ export default function App() {
                 <Wallet className="w-5 h-5" /> Add Previous Due
               </button>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses'].includes(activeTab) && (
+            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses', 'Warehouse'].includes(activeTab) && (
               <button 
                 onClick={handleOpenAdd}
                 className="bg-orange-500 text-white text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-600 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5"
               >
-                <Plus className="w-5 h-5" /> Add New {activeTab === 'Sales' ? 'Sale' : activeTab === 'Damaged' ? 'Damage Entry' : activeTab.slice(0, -1)}
+                <Plus className="w-5 h-5" /> Add New {activeTab === 'Sales' ? 'Sale' : activeTab === 'Damaged' ? 'Damage Entry' : activeTab === 'Warehouse' ? 'Warehouse Stock' : activeTab.slice(0, -1)}
               </button>
             )}
           </div>
         </div>
 
-        {/* Low Stock Banner */}
+        {/* Low Stock Banner — hidden by default, click to reveal, grouped by category */}
         {lowStockProducts.length > 0 && (activeTab === 'Dashboard' || activeTab === 'Inventory') && (
-          <div className="mb-8 bg-amber-50 border border-amber-200 rounded-2xl p-5 flex items-start gap-4 no-print">
-            <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <h4 className="text-amber-900 font-bold text-base">Low Stock Alert ({lowStockProducts.length} Items Below Threshold)</h4>
-              <p className="text-amber-700 text-sm mt-1">
-                The following products need restocking: {lowStockProducts.map(p => `${p.name} (${p.stock} left)`).join(', ')}.
-              </p>
-            </div>
+          <div className="mb-8 bg-amber-50 border border-amber-200 rounded-2xl p-5 no-print">
+            <button
+              type="button"
+              onClick={() => setShowLowStock(!showLowStock)}
+              className="w-full flex items-start gap-4 text-left"
+            >
+              <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <h4 className="text-amber-900 font-bold text-base flex items-center gap-2">
+                  Low Stock Alert ({lowStockProducts.length} Items Below Threshold)
+                  <span className="text-xs font-semibold text-amber-600 underline">{showLowStock ? 'Hide' : 'Show'}</span>
+                </h4>
+                {!showLowStock && <p className="text-amber-700 text-sm mt-1">Click to see which products need restocking.</p>}
+              </div>
+            </button>
+            {showLowStock && (
+              <div className="mt-4 pl-10 space-y-3">
+                {Object.entries(
+                  lowStockProducts.reduce((acc, p) => {
+                    const key = p.category || 'Uncategorized';
+                    (acc[key] = acc[key] || []).push(p);
+                    return acc;
+                  }, {})
+                ).sort(([a], [b]) => a.localeCompare(b)).map(([cat, items]) => (
+                  <div key={cat}>
+                    <p className="text-xs font-black text-amber-800 uppercase tracking-wide mb-1">{cat}</p>
+                    <p className="text-amber-700 text-sm">{items.map(p => `${p.name} (${p.stock} left)`).join(', ')}</p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
         {/* Dynamic Add / Edit Modal */}
         {showModal && (
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
-            <div className={`bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] transition-colors ${activeTab === 'Sales' ? 'w-[700px]' : 'w-[480px]'}`}>
+            <div className={`bg-[var(--bg-card)] rounded-2xl p-5 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] max-h-[90vh] overflow-y-auto ${activeTab === 'Sales' ? 'md:w-[700px]' : 'md:w-[480px]'}`}>
               <div className="flex justify-between items-center mb-5">
-                <h3 className="text-lg font-bold text-[var(--text-primary)]">{editingItem ? 'Edit' : 'Add New'} {activeTab === 'Damaged' ? 'Damage Entry' : activeTab.slice(0, -1)}</h3>
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">{editingItem ? 'Edit' : 'Add New'} {activeTab === 'Damaged' ? 'Damage Entry' : activeTab === 'Warehouse' ? 'Warehouse Stock' : activeTab.slice(0, -1)}</h3>
                 <button onClick={() => setShowModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
               </div>
 
@@ -1805,15 +2099,24 @@ export default function App() {
                     </div>
                     <div className="flex gap-4">
                       <input required name="stock" type="number" defaultValue={formData.stock !== undefined ? formData.stock : ''} placeholder="Current Stock" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <input required name="reorderLevel" type="number" defaultValue={formData.reorderLevel !== undefined ? formData.reorderLevel : ''} placeholder="Reorder Level" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <input required name="reorderLevel" type="number" disabled={formData.active === false} defaultValue={formData.reorderLevel !== undefined ? formData.reorderLevel : ''} placeholder="Reorder Level" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 disabled:opacity-50" />
                     </div>
+                    <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-3">
+                      <input
+                        type="checkbox"
+                        checked={formData.active !== false}
+                        onChange={(e) => setFormData({ ...formData, active: e.target.checked, reorderLevel: e.target.checked ? formData.reorderLevel : 0 })}
+                        className="w-4 h-4 accent-orange-500"
+                      />
+                      Active — included in low-stock alerts and reorder suggestions
+                    </label>
                   </>
                 )}
 
                 {activeTab === 'Sales' && (
                   <>
                     <div className="grid grid-cols-2 gap-3 mb-2">
-                      <input required name="customer" defaultValue={formData.customer || ''} placeholder="Customer Name" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <input name="customer" defaultValue={formData.customer || ''} placeholder="Customer Name (optional)" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                       <input name="customerPhone" defaultValue={formData.customerPhone || ''} placeholder="Customer Phone" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     </div>
                     <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
@@ -1821,10 +2124,23 @@ export default function App() {
                     <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
                       <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
                       {cartItems.map((item, idx) => {
-                        const rowProducts = item.categoryFilter ? products.filter(p => p.category === item.categoryFilter) : products;
+                        const searchTerm = (item.productSearch || '').toLowerCase();
+                        const rowProducts = products
+                          .filter(p => !item.categoryFilter || p.category === item.categoryFilter)
+                          .filter(p => !searchTerm || p.name.toLowerCase().includes(searchTerm));
                         const lineDiscount = Math.max(0, (parseFloat(item.customProductPrice) || 0) - (parseFloat(item.customSellPrice) || 0));
                         return (
                         <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
+                          <div className="relative">
+                            <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            <input
+                              type="text"
+                              value={item.productSearch || ''}
+                              onChange={(e) => handleCartChange(idx, 'productSearch', e.target.value)}
+                              placeholder="Search products to add..."
+                              className="w-full pl-9 pr-3 py-2.5 text-base border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400"
+                            />
+                          </div>
                           <div className="flex gap-2 items-center">
                             <select
                               value={item.categoryFilter}
@@ -1841,7 +2157,7 @@ export default function App() {
                               onChange={(e) => handleCartChange(idx, 'productId', e.target.value)} 
                               className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
                             >
-                              <option value="">Select Product...</option>
+                              <option value="">{rowProducts.length === 0 ? 'No matching products' : 'Select Product...'}</option>
                               {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
                             </select>
                             <input 
@@ -1859,6 +2175,7 @@ export default function App() {
                               </button>
                             )}
                           </div>
+                          {!formData.isCombo && (
                           <div className="flex gap-2 items-center pl-1">
                             <div className="flex-1">
                               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Product Price</label>
@@ -1890,6 +2207,7 @@ export default function App() {
                               </span>
                             )}
                           </div>
+                          )}
                         </div>
                         );
                       })}
@@ -1897,6 +2215,23 @@ export default function App() {
                     <button type="button" onClick={addCartRow} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline pt-1">
                       <Plus className="w-4 h-4" /> Add Another Item
                     </button>
+
+                    <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-3 mt-2">
+                      <input
+                        type="checkbox"
+                        checked={!!formData.isCombo}
+                        onChange={(e) => setFormData({ ...formData, isCombo: e.target.checked })}
+                        className="w-4 h-4 accent-orange-500"
+                      />
+                      Combo Sale — charge one total price for all items together
+                    </label>
+                    {formData.isCombo && (
+                      <input
+                        required name="comboPrice" type="number" step="0.01" defaultValue={formData.comboPrice || ''}
+                        placeholder="Combo Total Price (Tk)" onChange={handleInputChange}
+                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                      />
+                    )}
                     <div className="flex gap-4 pt-2">
                       <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Extra Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                       <select name="status" defaultValue={formData.status || 'Paid'} onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
@@ -1924,9 +2259,9 @@ export default function App() {
 
                 {activeTab === 'Customers' && (
                   <>
-                    <input required name="name" defaultValue={formData.name || ''} placeholder="Full Name" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    <input required name="email" type="email" defaultValue={formData.email || ''} placeholder="Email Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    <input name="phone" defaultValue={formData.phone || ''} placeholder="Phone Number" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="name" defaultValue={formData.name || ''} placeholder="Full Name (optional)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="email" type="email" defaultValue={formData.email || ''} placeholder="Email Address (optional)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="phone" defaultValue={formData.phone || ''} placeholder="Phone Number (optional)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="address" defaultValue={formData.address || ''} placeholder="Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                   </>
                 )}
@@ -2195,68 +2530,32 @@ export default function App() {
                   </>
                 )}
 
+                {activeTab === 'Warehouse' && (
+                  <>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      Link this to a shop product so "Transfer to Shop" can add straight into its stock — or leave it unlinked for a custom/unlisted item.
+                    </p>
+                    <select
+                      name="productId"
+                      defaultValue={formData.productId || ''}
+                      onChange={(e) => {
+                        const prod = products.find(p => p.id === parseInt(e.target.value, 10));
+                        setFormData({ ...formData, productId: e.target.value, productName: prod ? prod.name : formData.productName, category: prod ? prod.category : formData.category });
+                      }}
+                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    >
+                      <option value="">Not linked to a tracked product...</option>
+                      {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    <input required name="productName" defaultValue={formData.productName || ''} placeholder="Item Name" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input name="category" defaultValue={formData.category || ''} placeholder="Category (optional)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <input required name="qty" type="number" min="0" defaultValue={formData.qty ?? ''} placeholder="Quantity in Warehouse" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                  </>
+                )}
+
                 <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
                   <button type="button" onClick={() => setShowModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
                   <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save Changes</button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* ADD PREVIOUS DUE MODAL — records an opening balance for a customer.
-            This is deliberately its own table (not a fake sale), so it never shows up
-            in Sales, never prints as an invoice, and never inflates revenue reports. */}
-        {showPreviousDueModal && (
-          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
-            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[440px] transition-colors">
-              <div className="flex justify-between items-center mb-5">
-                <h3 className="text-lg font-bold text-[var(--text-primary)]">Add Previous Due</h3>
-                <button onClick={() => setShowPreviousDueModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
-              </div>
-
-              <form onSubmit={handleSavePreviousDue} className="space-y-4 text-sm">
-                <input
-                  required
-                  value={previousDueForm.customer}
-                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customer: e.target.value })}
-                  placeholder="Customer Name"
-                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <input
-                  value={previousDueForm.customerPhone}
-                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customerPhone: e.target.value })}
-                  placeholder="Customer Phone (optional)"
-                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <input
-                  required
-                  type="number" step="0.01" min="0.01"
-                  value={previousDueForm.amount}
-                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, amount: e.target.value })}
-                  placeholder="Due Amount (Tk)"
-                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <input
-                  value={previousDueForm.note}
-                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, note: e.target.value })}
-                  placeholder="Note (optional — e.g. 'from before using this app')"
-                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <input
-                  type="date"
-                  value={previousDueForm.date}
-                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, date: e.target.value })}
-                  max={new Date().toISOString().split('T')[0]}
-                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <p className="text-xs text-[var(--text-muted)]">
-                  This won't create a sale or invoice — it just shows up as a due amount on the Due Amounts page.
-                </p>
-
-                <div className="flex justify-end gap-3 pt-2 border-t border-[var(--border-card)]">
-                  <button type="button" onClick={() => setShowPreviousDueModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
-                  <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Save</button>
                 </div>
               </form>
             </div>
@@ -2373,7 +2672,7 @@ export default function App() {
                 {(() => {
                   const paid = selectedReceipt.paidAmount ?? (selectedReceipt.status === 'Paid' ? selectedReceipt.totalSellAmount : 0);
                   const due = Math.max(0, selectedReceipt.totalSellAmount - paid);
-                  if (due <= 1) return null;
+                  if (due <= 0) return null;
                   return (
                     <>
                       <div className="flex justify-between"><span>Paid</span><span>Tk {paid.toLocaleString()}</span></div>
@@ -2497,7 +2796,7 @@ export default function App() {
                   <div className="flex justify-between text-emerald-700"><span>Paid</span><span>Tk {selectedPurchaseReceipt.paidAmount.toLocaleString()}</span></div>
                   {(() => {
                     const due = selectedPurchaseReceipt.dueAmount ?? Math.max(0, selectedPurchaseReceipt.totalAmount - selectedPurchaseReceipt.paidAmount);
-                    if (due <= 1) return null;
+                    if (due <= 0) return null;
                     return <div className="flex justify-between font-bold text-red-600"><span>DUE</span><span>Tk {due.toLocaleString()}</span></div>;
                   })()}
                 </div>
@@ -2614,6 +2913,14 @@ export default function App() {
         {/* PRODUCTS TAB */}
         {activeTab === 'Products' && (
           <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-4 text-xs font-bold text-[var(--text-muted)]">
+                <span>{totalProductCount} product{totalProductCount !== 1 ? 's' : ''}</span>
+                <span>·</span>
+                <span>{totalStockUnits.toLocaleString()} units in stock</span>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] italic">Buy price &amp; profit are blurred — hover to reveal</p>
+            </div>
             {filteredProducts.length === 0 ? (
               <EmptyState
                 icon={products.length === 0 ? Box : PackageSearch}
@@ -2628,32 +2935,60 @@ export default function App() {
                   <th className="pb-3">CATEGORY</th>
                   <th className="pb-3">BUY PRICE</th>
                   <th className="pb-3">SELL PRICE</th>
+                  <th className="pb-3">PROFIT/UNIT</th>
                   <th className="pb-3">STOCK</th>
-                  <th className="pb-3">TOTAL ASSET</th>
+                  <th className="pb-3">STATUS</th>
                   <th className="pb-3 text-right">ACTION</th>
                 </tr>
               </thead>
               {Object.keys(productsByCategory).sort().map(catName => (
                 <tbody key={catName} className="divide-y divide-[var(--border-card)]">
                   <tr>
-                    <td colSpan={7} className="pt-5 pb-2">
+                    <td colSpan={8} className="pt-5 pb-2">
                       <span className="inline-flex items-center gap-1.5 text-orange-600 font-black text-xs uppercase tracking-wide">
                         <Tag className="w-3.5 h-3.5" /> {catName} <span className="text-[var(--text-muted)] font-semibold normal-case">({productsByCategory[catName].length})</span>
                       </span>
                     </td>
                   </tr>
                   {productsByCategory[catName].map(p => (
-                    <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                    <tr key={p.id} className={`hover:bg-[var(--bg-hover)] transition-colors ${p.active === false ? 'opacity-50' : ''}`}>
                       <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
                       <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
-                      <td className="py-4 text-[var(--text-secondary)]">Tk {p.buyPrice.toLocaleString()}</td>
+                      <td className="py-4 text-[var(--text-secondary)]">
+                        <span className="blur-sm hover:blur-none transition-all cursor-pointer select-none" title="Hover to reveal">Tk {p.buyPrice.toLocaleString()}</span>
+                      </td>
                       <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.sellPrice.toLocaleString()}</td>
                       <td className="py-4">
-                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-100 text-emerald-800'}`}>
-                          {p.stock} units {p.stock <= p.reorderLevel && '⚠️'}
-                        </span>
+                        <span className="blur-sm hover:blur-none transition-all cursor-pointer select-none text-emerald-600 font-bold" title="Hover to reveal">Tk {(p.sellPrice - p.buyPrice).toLocaleString()}</span>
                       </td>
-                      <td className="py-4 font-black text-[var(--text-primary)]">Tk {(p.buyPrice * p.stock).toLocaleString()}</td>
+                      <td className="py-4">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleAdjustStock(p, -1)}
+                            title="Remove 1 unit"
+                            className="w-6 h-6 rounded-md bg-[var(--bg-hover)] border border-[var(--border-card)] text-[var(--text-secondary)] hover:bg-red-100 hover:text-red-600 hover:border-red-300 flex items-center justify-center font-bold text-sm leading-none transition-colors"
+                          >
+                            −
+                          </button>
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel && p.active !== false ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-100 text-emerald-800'}`}>
+                            {p.stock} units {p.stock <= p.reorderLevel && p.active !== false && '⚠️'}
+                          </span>
+                          <button
+                            onClick={() => handleAdjustStock(p, 1)}
+                            title="Add 1 unit (restock)"
+                            className="w-6 h-6 rounded-md bg-[var(--bg-hover)] border border-[var(--border-card)] text-[var(--text-secondary)] hover:bg-emerald-100 hover:text-emerald-600 hover:border-emerald-300 flex items-center justify-center font-bold text-sm leading-none transition-colors"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </td>
+                      <td className="py-4">
+                        {p.active === false ? (
+                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-600">Inactive</span>
+                        ) : (
+                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Active</span>
+                        )}
+                      </td>
                       <td className="py-4 text-right flex justify-end gap-1">
                         <button onClick={() => handleOpenEdit(p)} title="Edit Product" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                         <button onClick={() => handleDelete(p.id, 'Products')} title="Delete Product" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
@@ -2670,11 +3005,16 @@ export default function App() {
         {/* INVENTORY TAB (Directly synced with Products) */}
         {activeTab === 'Inventory' && (
           <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
-            <div className="flex justify-between items-center mb-6">
+            <div className="flex flex-wrap justify-between items-center gap-3 mb-2">
               <h3 className="font-extrabold text-[var(--text-primary)] text-lg">Stock Assets Overview</h3>
               <div className="bg-orange-500/10 border border-orange-500/20 px-4 py-2 rounded-xl text-orange-600 text-sm font-bold">
                 Total Inventory Capital Asset: Tk {currentInventoryValue.toLocaleString()}
               </div>
+            </div>
+            <div className="flex items-center gap-4 text-xs font-bold text-[var(--text-muted)] mb-6">
+              <span>{totalProductCount} product{totalProductCount !== 1 ? 's' : ''}</span>
+              <span>·</span>
+              <span>{totalStockUnits.toLocaleString()} units in stock</span>
             </div>
             {products.length === 0 ? (
               <EmptyState icon={Warehouse} title="No inventory yet" message="Add products to see your stock assets here." />
@@ -2690,17 +3030,21 @@ export default function App() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-card)]">
-                {products.map(p => (
-                  <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                {[...products].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
+                  <tr key={p.id} className={`hover:bg-[var(--bg-hover)] transition-colors ${p.active === false ? 'opacity-50' : ''}`}>
                     <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
                     <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">Tk {p.buyPrice.toLocaleString()}</td>
+                    <td className="py-4 text-[var(--text-secondary)]">
+                      <span className="blur-sm hover:blur-none transition-all cursor-pointer select-none" title="Hover to reveal">Tk {p.buyPrice.toLocaleString()}</span>
+                    </td>
                     <td className="py-4">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${p.stock <= p.reorderLevel && p.active !== false ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
                         {p.stock} units
                       </span>
                     </td>
-                    <td className="py-4 font-black text-[var(--text-primary)]">Tk {(p.buyPrice * p.stock).toLocaleString()}</td>
+                    <td className="py-4 font-black text-[var(--text-primary)]">
+                      <span className="blur-sm hover:blur-none transition-all cursor-pointer select-none" title="Hover to reveal">Tk {(p.buyPrice * p.stock).toLocaleString()}</span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2736,7 +3080,7 @@ export default function App() {
                     <td className="py-4 text-[var(--text-secondary)]">{s.items.length} item(s)</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
                     <td className="py-4">
-                      {due <= 1 ? (
+                      {due <= 0 ? (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${paid.toLocaleString()}`}>
@@ -2791,7 +3135,7 @@ export default function App() {
                     <td className="py-4 text-[var(--text-secondary)]">{totalQty}</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {p.totalAmount.toLocaleString()}</td>
                     <td className="py-4">
-                      {due <= 1 ? (
+                      {due <= 0 ? (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${p.paidAmount.toLocaleString()}`}>
@@ -2879,7 +3223,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <button
-                onClick={() => setDueView('customer')}
+                onClick={() => { setDueView('customer'); setDuePartyFilter(''); }}
                 className={`text-left p-6 rounded-2xl border shadow-sm transition-colors ${dueView === 'customer' ? 'bg-orange-500 border-orange-500 text-white' : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-primary)]'}`}
               >
                 <p className={`text-sm font-semibold mb-1 ${dueView === 'customer' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>Customers Owe You</p>
@@ -2887,7 +3231,7 @@ export default function App() {
                 <p className={`text-xs mt-1 ${dueView === 'customer' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>{customerDues.length} pending sale{customerDues.length !== 1 ? 's' : ''}</p>
               </button>
               <button
-                onClick={() => setDueView('vendor')}
+                onClick={() => { setDueView('vendor'); setDuePartyFilter(''); }}
                 className={`text-left p-6 rounded-2xl border shadow-sm transition-colors ${dueView === 'vendor' ? 'bg-orange-500 border-orange-500 text-white' : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-primary)]'}`}
               >
                 <p className={`text-sm font-semibold mb-1 ${dueView === 'vendor' ? 'text-orange-100' : 'text-[var(--text-muted)]'}`}>You Owe Suppliers</p>
@@ -2896,10 +3240,39 @@ export default function App() {
               </button>
             </div>
 
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-4 shadow-sm flex flex-wrap items-end gap-3 transition-colors">
+              <div>
+                <label className="block text-[10px] font-bold text-[var(--text-muted)] uppercase mb-1">From</label>
+                <input type="date" value={dueDateFrom} onChange={(e) => setDueDateFrom(e.target.value)} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-[var(--text-muted)] uppercase mb-1">To</label>
+                <input type="date" value={dueDateTo} onChange={(e) => setDueDateTo(e.target.value)} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-[var(--text-muted)] uppercase mb-1">{dueView === 'customer' ? 'Customer' : 'Supplier'}</label>
+                <select value={duePartyFilter} onChange={(e) => setDuePartyFilter(e.target.value)} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                  <option value="">All {dueView === 'customer' ? 'Customers' : 'Suppliers'}</option>
+                  {[...new Set((dueView === 'customer' ? customerDues.map(s => s.customer) : vendorDues.map(p => p.supplier)))].sort().map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </div>
+              {(dueDateFrom || dueDateTo || duePartyFilter) && (
+                <button type="button" onClick={() => { setDueDateFrom(''); setDueDateTo(''); setDuePartyFilter(''); }} className="text-xs font-bold text-orange-600 hover:underline mb-2">
+                  Clear filters
+                </button>
+              )}
+              <div className="ml-auto text-right">
+                <p className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Filtered Total</p>
+                <p className="text-lg font-black text-red-600">Tk {(dueView === 'customer' ? filteredCustomerDueTotal : filteredVendorDueTotal).toLocaleString()}</p>
+              </div>
+            </div>
+
             <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
               {dueView === 'customer' ? (
-                customerDues.length === 0 ? (
-                  <EmptyState icon={Wallet} title="No customer dues" message="Every sale is fully paid — nice work!" />
+                filteredCustomerDues.length === 0 ? (
+                  <EmptyState icon={Wallet} title="No customer dues" message="Every sale in this range is fully paid — nice work!" />
                 ) : (
                   <table className="w-full text-left text-sm">
                     <thead>
@@ -2908,17 +3281,11 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-card)]">
-                      {customerDues.map(s => {
+                      {filteredCustomerDues.map(s => {
                         const paid = s.paidAmount ?? 0;
                         return (
                           <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                            <td className="py-4 font-bold text-orange-600">
-                              {s.isPreviousDue ? (
-                                <span className="inline-flex items-center gap-1.5">
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Opening Balance</span>
-                                </span>
-                              ) : s.id}
-                            </td>
+                            <td className="py-4 font-bold text-orange-600">{s.id}</td>
                             <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
                             <td className="py-4 text-[var(--text-secondary)]">{s.customerPhone || '—'}</td>
                             <td className="py-4 text-[var(--text-secondary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
@@ -2926,14 +3293,8 @@ export default function App() {
                             <td className="py-4 font-black text-red-600">Tk {s.dueAmount.toLocaleString()}</td>
                             <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
                             <td className="py-4 text-right flex justify-end gap-1">
-                              {s.isPreviousDue ? (
-                                <button onClick={() => handleSettlePreviousDue(s.rawId)} title="Mark as Paid" className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm transition-all whitespace-nowrap">Mark as Paid</button>
-                              ) : (
-                                <>
-                                  <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                                  <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
-                                </>
-                              )}
+                              <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                              <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                             </td>
                           </tr>
                         );
@@ -2942,8 +3303,8 @@ export default function App() {
                   </table>
                 )
               ) : (
-                vendorDues.length === 0 ? (
-                  <EmptyState icon={Wallet} title="No vendor dues" message="You're all settled up with your suppliers." />
+                filteredVendorDues.length === 0 ? (
+                  <EmptyState icon={Wallet} title="No vendor dues" message="You're all settled up with your suppliers in this range." />
                 ) : (
                   <table className="w-full text-left text-sm">
                     <thead>
@@ -2952,7 +3313,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-card)]">
-                      {vendorDues.map(p => (
+                      {filteredVendorDues.map(p => (
                         <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                           <td className="py-4 font-bold text-orange-600">{p.id}</td>
                           <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
@@ -2970,75 +3331,6 @@ export default function App() {
                     </tbody>
                   </table>
                 )
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* EXPENSES TAB */}
-        {activeTab === 'Expenses' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
-                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Today's Expenses</p>
-                <p className="text-2xl font-bold text-red-600">Tk {totalExpensesToday.toLocaleString()}</p>
-              </div>
-              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
-                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">This Month</p>
-                <p className="text-2xl font-bold text-red-600">Tk {totalExpensesThisMonth.toLocaleString()}</p>
-              </div>
-              <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
-                <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">All Time</p>
-                <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {totalExpensesAllTime.toLocaleString()}</p>
-              </div>
-            </div>
-
-            {Object.keys(expensesByCategory).length > 0 && (
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
-                <p className="text-sm font-bold text-[var(--text-secondary)] mb-3">By Category</p>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(expensesByCategory)
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([cat, amt]) => (
-                      <span key={cat} className="px-3 py-1.5 rounded-full text-xs font-bold bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-card)]">
-                        {cat}: <span className="text-red-600">Tk {amt.toLocaleString()}</span>
-                      </span>
-                    ))}
-                </div>
-              </div>
-            )}
-
-            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
-              {filteredExpenses.length === 0 ? (
-                <EmptyState
-                  icon={Receipt}
-                  title={expenseTransactions.length === 0 ? 'No expenses logged yet' : 'No matching expenses'}
-                  message={expenseTransactions.length === 0 ? "Click 'Add New Expense' to log your first one." : 'Try a different search term.'}
-                />
-              ) : (
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                      <th className="pb-3">CATEGORY</th><th className="pb-3">AMOUNT</th><th className="pb-3">DATE</th><th className="pb-3">NOTE</th><th className="pb-3 text-right">ACTION</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[var(--border-card)]">
-                    {filteredExpenses.map(t => (
-                      <tr key={t.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                        <td className="py-4">
-                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-card)]">{t.category || 'Other'}</span>
-                        </td>
-                        <td className="py-4 font-bold text-red-600">Tk {t.amount.toLocaleString()}</td>
-                        <td className="py-4 text-[var(--text-muted)]">{t.date}</td>
-                        <td className="py-4 text-[var(--text-secondary)]">{t.note || '—'}</td>
-                        <td className="py-4 text-right flex justify-end gap-1">
-                          <button onClick={() => handleOpenEdit(t)} title="Edit Expense" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
-                          <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Expense" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               )}
             </div>
           </div>
@@ -3232,39 +3524,251 @@ export default function App() {
               </div>
             </form>
 
-            {/* BACKUP & RESTORE */}
+            {/* BACKUP & RESTORE — redesigned as clearly separated action cards */}
             <div className="mt-8 pt-6 border-t border-[var(--border-card)]">
-              <h3 className="text-lg font-black text-[var(--text-primary)] mb-2">Data Backup &amp; Restore</h3>
-              <p className="text-xs text-[var(--text-muted)] mb-4">
-                Your data is only stored in this browser. Export a backup file regularly (e.g. daily,
-                end of shift) and keep it somewhere safe — a USB drive, email, or cloud storage folder.
-                If this browser's data is ever lost, you can restore everything from the last backup file.
+              <h3 className="text-lg font-black text-[var(--text-primary)] mb-1">Data Backup &amp; Import</h3>
+              <p className="text-xs text-[var(--text-muted)] mb-5">
+                Your data lives in the cloud, but it's still smart to keep your own backup file somewhere safe —
+                a phone, USB drive, or cloud folder — in case anything ever goes wrong.
               </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleExportData}
-                  className="bg-orange-500 text-white font-bold px-5 py-3 rounded-xl hover:bg-orange-600 shadow-md flex items-center gap-2 text-sm"
-                >
-                  <Save className="w-4 h-4" /> Export Backup (JSON)
-                </button>
 
-                <label className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] font-bold px-5 py-3 rounded-xl hover:bg-[var(--bg-hover)] shadow-sm flex items-center gap-2 text-sm cursor-pointer transition-colors">
-                  <RefreshCw className="w-4 h-4" /> Import Backup (JSON)
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    onChange={handleImportData}
-                    className="hidden"
-                  />
-                </label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Export — always safe */}
+                <div className="border border-[var(--border-card)] rounded-2xl p-5 bg-[var(--bg-hover)]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Save className="w-4 h-4 text-emerald-600" />
+                    <p className="font-bold text-sm text-[var(--text-primary)]">Export Full Backup</p>
+                  </div>
+                  <p className="text-xs text-[var(--text-muted)] mb-4">Downloads everything — products, sales, customers, suppliers, purchases — as one JSON file. Safe to run anytime.</p>
+                  <button
+                    type="button"
+                    onClick={handleExportData}
+                    className="w-full bg-orange-500 text-white font-bold px-4 py-2.5 rounded-xl hover:bg-orange-600 shadow-sm flex items-center justify-center gap-2 text-sm"
+                  >
+                    <Download className="w-4 h-4" /> Export Backup (JSON)
+                  </button>
+                </div>
+
+                {/* Merge-import products — safe, additive */}
+                <div className="border border-[var(--border-card)] rounded-2xl p-5 bg-[var(--bg-hover)]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Box className="w-4 h-4 text-emerald-600" />
+                    <p className="font-bold text-sm text-[var(--text-primary)]">Import / Update Products</p>
+                  </div>
+                  <p className="text-xs text-[var(--text-muted)] mb-4">Adds new products and updates matching ones by name — everything else in your shop is left untouched. Safe to run anytime.</p>
+                  <label className="w-full border border-[var(--input-border)] bg-[var(--bg-card)] text-[var(--text-primary)] font-bold px-4 py-2.5 rounded-xl hover:bg-[var(--bg-hover)] shadow-sm flex items-center justify-center gap-2 text-sm cursor-pointer transition-colors">
+                    <Box className="w-4 h-4" /> Choose Product File (JSON)
+                    <input type="file" accept="application/json,.json" onChange={handleMergeImportProducts} className="hidden" />
+                  </label>
+                </div>
+
+                {/* Bulk import customers — safe, additive */}
+                <div className="border border-[var(--border-card)] rounded-2xl p-5 bg-[var(--bg-hover)]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Users className="w-4 h-4 text-emerald-600" />
+                    <p className="font-bold text-sm text-[var(--text-primary)]">Import Customers</p>
+                  </div>
+                  <p className="text-xs text-[var(--text-muted)] mb-4">Adds new customers from a JSON file, skipping any that already match by phone or name. Safe to run anytime.</p>
+                  <label className="w-full border border-[var(--input-border)] bg-[var(--bg-card)] text-[var(--text-primary)] font-bold px-4 py-2.5 rounded-xl hover:bg-[var(--bg-hover)] shadow-sm flex items-center justify-center gap-2 text-sm cursor-pointer transition-colors">
+                    <Users className="w-4 h-4" /> Choose Customer File (JSON)
+                    <input type="file" accept="application/json,.json" onChange={handleImportCustomers} className="hidden" />
+                  </label>
+                </div>
+
+                {/* Full restore — destructive, clearly flagged */}
+                <div className="border border-red-300 rounded-2xl p-5 bg-red-500/5">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600" />
+                    <p className="font-bold text-sm text-red-700">Restore Full Backup</p>
+                  </div>
+                  <p className="text-xs text-red-600 mb-4">⚠️ Replaces ALL your current data with what's in the file. Only use this for disaster recovery — not for adding a few products.</p>
+                  <label className="w-full border border-red-300 bg-white text-red-700 font-bold px-4 py-2.5 rounded-xl hover:bg-red-50 shadow-sm flex items-center justify-center gap-2 text-sm cursor-pointer transition-colors">
+                    <RefreshCw className="w-4 h-4" /> Choose Backup File (JSON)
+                    <input type="file" accept="application/json,.json" onChange={handleImportData} className="hidden" />
+                  </label>
+                </div>
               </div>
             </div>
           </div>
         )}
 
+        {/* TRANSACTIONS TAB — every money movement, with profit shown for sale-linked income */}
+        {activeTab === 'Transactions' && (
+          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+            {filteredTransactions.length === 0 ? (
+              <EmptyState
+                icon={transactions.length === 0 ? ArrowLeftRight : PackageSearch}
+                title={transactions.length === 0 ? 'No transactions yet' : 'No matching transactions'}
+                message={transactions.length === 0 ? "Transactions from sales are logged automatically — you can also click 'Add New Transaction' for anything else." : 'Try a different search term.'}
+              />
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                    <th className="pb-3">DATE</th><th className="pb-3">ID</th><th className="pb-3">TYPE</th><th className="pb-3">REF</th><th className="pb-3">AMOUNT</th><th className="pb-3">PROFIT</th><th className="pb-3">STATUS</th><th className="pb-3 text-right">ACTION</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--border-card)]">
+                  {filteredTransactions.map(t => {
+                    const profit = transactionProfit(t);
+                    return (
+                      <tr key={t.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                        <td className="py-4 text-[var(--text-muted)]">{t.date}</td>
+                        <td className="py-4 font-bold text-orange-600">{t.id}</td>
+                        <td className="py-4">
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${t.type === 'Income' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'}`}>{t.type}</span>
+                        </td>
+                        <td className="py-4 text-[var(--text-secondary)]">{t.refId || '—'}</td>
+                        <td className="py-4 font-bold text-[var(--text-primary)]">Tk {t.amount.toLocaleString()}</td>
+                        <td className="py-4 font-bold">
+                          {profit === null ? <span className="text-[var(--text-muted)]">—</span> : (
+                            <span className={profit >= 0 ? 'text-emerald-600' : 'text-red-600'}>Tk {profit.toLocaleString()}</span>
+                          )}
+                        </td>
+                        <td className="py-4 text-[var(--text-secondary)]">{t.status}</td>
+                        <td className="py-4 text-right flex justify-end gap-1">
+                          <button onClick={() => handleOpenEdit(t)} title="Edit Transaction" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          <button onClick={() => handleDelete(t.id, 'Transactions')} title="Delete Transaction" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {/* WAREHOUSE TAB — stock held separately from the shop floor, with a one-click transfer */}
+        {activeTab === 'Warehouse' && (
+          <div className="space-y-6">
+            <div className="bg-gradient-to-br from-slate-700 to-slate-900 rounded-2xl p-6 shadow-sm text-white">
+              <p className="text-sm font-semibold text-slate-300 mb-1">Total Units in Warehouse</p>
+              <p className="text-2xl font-black">{totalWarehouseUnits.toLocaleString()} units</p>
+              <p className="text-xs mt-1 text-slate-300">{warehouseStock.length} item{warehouseStock.length !== 1 ? 's' : ''} tracked separately from your shop floor</p>
+            </div>
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              {filteredWarehouseStock.length === 0 ? (
+                <EmptyState
+                  icon={Boxes}
+                  title={warehouseStock.length === 0 ? 'No warehouse stock yet' : 'No matching items'}
+                  message={warehouseStock.length === 0 ? "Click 'Add New Warehouse Stock' to start tracking inventory held outside the shop." : 'Try a different search term.'}
+                />
+              ) : (
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                      <th className="pb-3">ITEM</th><th className="pb-3">CATEGORY</th><th className="pb-3">WAREHOUSE QTY</th><th className="pb-3">LINKED SHOP PRODUCT</th><th className="pb-3 text-right">ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-card)]">
+                    {filteredWarehouseStock.map(w => {
+                      const linkedProduct = w.productId ? products.find(p => p.id === w.productId) : null;
+                      return (
+                        <tr key={w.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                          <td className="py-4 font-bold text-[var(--text-primary)]">{w.productName}</td>
+                          <td className="py-4 text-[var(--text-secondary)]">{w.category || '—'}</td>
+                          <td className="py-4">
+                            <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700">{w.qty} units</span>
+                          </td>
+                          <td className="py-4 text-[var(--text-secondary)]">
+                            {linkedProduct ? (
+                              <span className="text-emerald-700 font-semibold">{linkedProduct.name} ({linkedProduct.stock} on shop floor)</span>
+                            ) : (
+                              <span className="text-[var(--text-muted)] italic">Not linked</span>
+                            )}
+                          </td>
+                          <td className="py-4 text-right flex justify-end items-center gap-1">
+                            <button onClick={() => handleOpenEdit(w)} title="Edit" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(w.id, 'Warehouse')} title="Delete" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                            <button
+                              onClick={() => handleTransferToShop(w)}
+                              className="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm transition-all flex items-center gap-1.5 whitespace-nowrap"
+                            >
+                              <ArrowRightLeft className="w-3.5 h-3.5" /> Transfer to Shop
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* EXPENSES TAB — operating costs (food, delivery, rent, etc) tracked separately from COGS */}
+        {activeTab === 'Expenses' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Today</p>
+                <p className="text-xl font-black text-[var(--text-primary)]">Tk {totalExpensesToday.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">This Month</p>
+                <p className="text-xl font-black text-[var(--text-primary)]">Tk {totalExpensesThisMonth.toLocaleString()}</p>
+              </div>
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">All Time</p>
+                <p className="text-xl font-black text-red-500">Tk {totalExpensesAllTime.toLocaleString()}</p>
+              </div>
+            </div>
+
+            {Object.keys(expensesByCategory).length > 0 && (
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">By Category (All Time)</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {Object.entries(expensesByCategory).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
+                    <div key={cat} className="bg-[var(--bg-hover)] rounded-xl p-3">
+                      <p className="text-[11px] font-semibold text-[var(--text-muted)] truncate">{cat}</p>
+                      <p className="text-sm font-bold text-[var(--text-primary)]">Tk {amt.toLocaleString()}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              {filteredExpenses.length === 0 ? (
+                <EmptyState
+                  icon={Receipt}
+                  title={expenseTransactions.length === 0 ? 'No expenses logged yet' : 'No matching expenses'}
+                  message={expenseTransactions.length === 0 ? "Click 'Add New Expense' to log your first cost — food, delivery, rent, whatever it takes to run the shop." : 'Try a different search term.'}
+                />
+              ) : (
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                      <th className="pb-3">DATE</th><th className="pb-3">CATEGORY</th><th className="pb-3">NOTE</th><th className="pb-3">AMOUNT</th><th className="pb-3 text-right">ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-card)]">
+                    {filteredExpenses.map(t => (
+                      <tr key={t.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                        <td className="py-4 text-[var(--text-muted)]">{t.date}</td>
+                        <td className="py-4">
+                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700">{t.category || 'Other'}</span>
+                        </td>
+                        <td className="py-4 text-[var(--text-secondary)]">{t.note || '—'}</td>
+                        <td className="py-4 font-bold text-[var(--text-primary)]">Tk {t.amount.toLocaleString()}</td>
+                        <td className="py-4 text-right flex justify-end gap-1">
+                          <button onClick={() => handleOpenEdit(t)} title="Edit Expense" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                          <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Expense" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* GENERIC TABLES FOR OTHER TABS */}
-        {['Categories', 'Customers', 'Suppliers', 'Transactions', 'Damaged'].includes(activeTab) && (
+        {['Categories', 'Customers', 'Suppliers', 'Damaged'].includes(activeTab) && (
           <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
             {genericDataMap[activeTab.toLowerCase()].length === 0 ? (
               <EmptyState icon={Inbox} title={`No ${activeTab.toLowerCase()} yet`} message={`Click 'Add New ${activeTab.slice(0, -1)}' to create your first entry.`} />
@@ -3287,6 +3791,9 @@ export default function App() {
                       <td key={i} className="py-4 font-medium text-[var(--text-secondary)]">{typeof val === 'object' ? JSON.stringify(val) : val}</td>
                     ))}
                     <td className="py-4 text-right flex justify-end gap-1">
+                      {activeTab === 'Customers' && (
+                        <button onClick={() => handleOpenPreviousDue(item)} title="Add Previous Due" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Wallet className="w-4 h-4" /></button>
+                      )}
                       <button onClick={() => handleOpenEdit(item)} title="Edit Entry" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(item.id, activeTab)} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
