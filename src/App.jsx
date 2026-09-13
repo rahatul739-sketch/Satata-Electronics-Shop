@@ -497,7 +497,7 @@ export default function App() {
     if (amount <= 0) return alert('Please enter a due amount greater than 0.');
 
     try {
-      const orderId = nextSequentialId(sales.map(s => s.id), '#DUE-');
+      const orderId = await nextSequentialId(sales.map(s => s.id), 'DUE', '#DUE-');
       const saleRecord = {
         id: orderId,
         customer: previousDueForm.customer.trim(),
@@ -663,14 +663,24 @@ export default function App() {
 
   // Save Item Handler
   // Generates the next sequential id for a given prefix, starting at 10001.
-  // Existing records keep whatever id they already have — this only governs new ones.
-  const nextSequentialId = (existingIds, prefix) => {
+  // This asks the database for the number atomically (via next_sequential_id RPC),
+  // so two devices saving at the same time can never be handed the same number.
+  // Falls back to a locally-computed guess only if that function isn't set up yet
+  // (e.g. the fix-sequential-id-collisions.sql migration hasn't been run).
+  const nextSequentialId = async (existingIds, dbPrefix, displayPrefix) => {
+    try {
+      const { data, error } = await supabase.rpc('next_sequential_id', { p_prefix: dbPrefix });
+      if (error) throw error;
+      if (data != null) return `${displayPrefix}${data}`;
+    } catch (err) {
+      console.warn('next_sequential_id RPC unavailable, falling back to local guess:', err.message);
+    }
     const nums = existingIds
-      .filter(id => id && id.startsWith(prefix))
-      .map(id => parseInt(id.slice(prefix.length).replace(/\D/g, ''), 10))
+      .filter(id => id && id.startsWith(displayPrefix))
+      .map(id => parseInt(id.slice(displayPrefix.length).replace(/\D/g, ''), 10))
       .filter(n => !isNaN(n));
     const next = nums.length > 0 ? Math.max(...nums) + 1 : 10001;
-    return `${prefix}${next}`;
+    return `${displayPrefix}${next}`;
   };
 
   const handleSaveItem = async (e) => {
@@ -772,7 +782,7 @@ export default function App() {
 
         const discount = parseFloat(formData.discount) || 0;
         const totalSellAmount = subtotal - discount;
-        const orderId = editingItem ? editingItem.id : nextSequentialId(sales.map(s => s.id), '#ORD-');
+        const orderId = editingItem ? editingItem.id : await nextSequentialId(sales.map(s => s.id), 'ORD', '#ORD-');
 
         const saleStatus = formData.status || 'Paid';
         let paidAmount;
@@ -989,7 +999,7 @@ export default function App() {
 
         const paidAmount = Math.min(parseFloat(formData.paidAmount) || 0, totalAmount);
         const status = paidAmount <= 0 ? 'Due' : paidAmount >= totalAmount ? 'Paid' : 'Partial';
-        const purchaseId = editingItem ? editingItem.id : nextSequentialId(purchases.map(p => p.id), '#PUR-');
+        const purchaseId = editingItem ? editingItem.id : await nextSequentialId(purchases.map(p => p.id), 'PUR', '#PUR-');
         const fullyReceived = processedItems.every(i => i.receivedQty >= i.qty);
 
         const purchaseRecord = {
@@ -1055,7 +1065,7 @@ export default function App() {
           setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
         } else {
           const newTxn = {
-            id: nextSequentialId(transactions.map(t => t.id), 'TXN-'),
+            id: await nextSequentialId(transactions.map(t => t.id), 'TXN', 'TXN-'),
             ...formData,
             amount: parseFloat(formData.amount),
             date: new Date().toISOString().split('T')[0]
@@ -1080,7 +1090,7 @@ export default function App() {
           setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
         } else {
           const newExpense = {
-            id: nextSequentialId(transactions.map(t => t.id), 'TXN-'),
+            id: await nextSequentialId(transactions.map(t => t.id), 'TXN', 'TXN-'),
             type: 'Expense', amount,
             category: formData.category, note: formData.note || '',
             status: 'Success',
