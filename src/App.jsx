@@ -5,7 +5,8 @@ import {
   ShoppingCart, Users, Truck, ArrowLeftRight, PieChart, Settings, 
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
-  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History, Boxes, ArrowRightLeft
+  Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History, Boxes, ArrowRightLeft,
+  Banknote, CreditCard, Undo2, Calculator, MessageCircle, AlertOctagon
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -17,12 +18,6 @@ const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_P0wRpIBl7WAe-RIwXqztjA_7DsJ1A9d
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 // --- INITIAL DEFAULT MOCK DATA ---
-const defaultMonthlySales = [
-  { month: 'Jan', sales: 200000 }, { month: 'Feb', sales: 240000 },
-  { month: 'Mar', sales: 300000 }, { month: 'Apr', sales: 430000 },
-  { month: 'May', sales: 300000 }, { month: 'Jun', sales: 486200 },
-];
-
 const defaultCategories = [
   { id: 1, name: 'Electronics', totalItems: 2, description: 'Gadgets, appliances, and electronic components' },
   { id: 2, name: 'Home Appliances', totalItems: 1, description: 'Refrigerators, TVs, and fans' },
@@ -65,12 +60,31 @@ const defaultTransactions = [
 
 const EXPENSE_CATEGORIES = ['Food/Eating', 'Delivery/Transport', 'Rent', 'Utilities', 'Staff/Salary', 'Maintenance', 'Marketing', 'Other'];
 
+// How many days old a due date is — used to flag overdue customer/vendor dues.
+const daysOverdue = (dateStr) => {
+  if (!dateStr) return 0;
+  return Math.floor((Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24));
+};
+
+// Builds a wa.me link pre-filled with a payment reminder, from a Bangladeshi local number.
+// Takes just the first number if several are stored comma/slash separated, strips everything
+// but digits, and adds the 880 country code (dropping a leading 0) if it isn't already there.
+const buildWhatsAppReminderLink = (phone, message) => {
+  if (!phone) return null;
+  const firstNumber = phone.split(/[,/]/)[0].replace(/\D/g, '');
+  if (!firstNumber) return null;
+  const withCountryCode = firstNumber.startsWith('880') ? firstNumber : `880${firstNumber.replace(/^0/, '')}`;
+  return `https://wa.me/${withCountryCode}?text=${encodeURIComponent(message)}`;
+};
+
 const defaultSettings = {
   shopName: 'Satota Electronics',
   proprietor: 'Fahim Khan',
   phone: '01758392250, 01727013619',
   address: 'Sila bristy market, Pollibidduit, Kaliakoir, Gazipur',
   currency: 'Tk',
+  cashBalance: 0,
+  lastBackupAt: null,
   receiptPolicies: [
     'Electronics warranty subject to manufacturer guidelines.',
     'No returns after purchase without original invoice.',
@@ -186,8 +200,8 @@ const dbMap = {
     fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '' }),
   },
   settings: {
-    toDb: (s) => ({ shop_name: s.shopName, proprietor: s.proprietor, phone: s.phone, address: s.address, currency: s.currency, receipt_policies: s.receiptPolicies }),
-    fromDb: (r) => ({ shopName: r.shop_name, proprietor: r.proprietor, phone: r.phone, address: r.address, currency: r.currency, receiptPolicies: r.receipt_policies || [] }),
+    toDb: (s) => ({ shop_name: s.shopName, proprietor: s.proprietor, phone: s.phone, address: s.address, currency: s.currency, receipt_policies: s.receiptPolicies, cash_balance: s.cashBalance ?? 0, last_backup_at: s.lastBackupAt || null }),
+    fromDb: (r) => ({ shopName: r.shop_name, proprietor: r.proprietor, phone: r.phone, address: r.address, currency: r.currency, receiptPolicies: r.receipt_policies || [], cashBalance: r.cash_balance !== null && r.cash_balance !== undefined ? Number(r.cash_balance) : 0, lastBackupAt: r.last_backup_at || null }),
   },
   damaged: {
     toDb: (d) => ({
@@ -481,6 +495,27 @@ export default function App() {
   const [showPreviousDueModal, setShowPreviousDueModal] = useState(false);
   const [previousDueForm, setPreviousDueForm] = useState({ customer: '', customerPhone: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
 
+  // "Record Payment" modal on the Due Amounts page — a quick, dedicated way to log a
+  // partial or full payment against a due sale/purchase without opening the full editor.
+  const [paymentModal, setPaymentModal] = useState(null); // { kind: 'customer' | 'vendor', record }
+  const [paymentAmountInput, setPaymentAmountInput] = useState('');
+
+  // "Add Money" modal on the Expenses page — logs a capital injection (owner deposit,
+  // loan, cash from another source) into the business and tops up the cash balance.
+  const [showAddMoneyModal, setShowAddMoneyModal] = useState(false);
+  const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+
+  // "Process Return" modal on the Sales page — returns some or all items from a past
+  // sale: restocks the product(s), shrinks the sale's total, and refunds any cash that's
+  // now owed back to the customer, without deleting the original sale record.
+  const [returnModal, setReturnModal] = useState(null); // the sale being returned against
+  const [returnQtyInputs, setReturnQtyInputs] = useState({}); // { [itemIndex]: qtyToReturnNow }
+
+  // "Close Till" modal on the Expenses page — end-of-day cash count vs. what the system
+  // expects, so a counting mistake or shortage surfaces the same day instead of drifting.
+  const [showCloseTillModal, setShowCloseTillModal] = useState(false);
+  const [closeTillForm, setCloseTillForm] = useState({ countedAmount: '', note: '' });
+
   const handleOpenPreviousDue = (customer) => {
     setPreviousDueForm({
       customer: customer ? customer.name : '',
@@ -536,6 +571,215 @@ export default function App() {
     }
   };
 
+  const openPaymentModal = (kind, record) => {
+    setPaymentModal({ kind, record });
+    setPaymentAmountInput('');
+  };
+
+  const submitRecordPayment = async (e) => {
+    e.preventDefault();
+    if (!paymentModal) return;
+    const { kind, record } = paymentModal;
+    const paymentNow = parseFloat(paymentAmountInput) || 0;
+    if (paymentNow <= 0) return alert('Enter a payment amount greater than 0.');
+
+    try {
+      if (kind === 'customer') {
+        const total = record.totalSellAmount;
+        const oldPaid = record.paidAmount ?? 0;
+        const newPaid = Math.min(oldPaid + paymentNow, total);
+        const actuallyApplied = newPaid - oldPaid; // in case the input overshoots the due amount
+        const newStatus = newPaid >= total ? 'Paid' : 'Partial';
+
+        const { error: saleError } = await supabase.from('sales').update({ paid_amount: newPaid, status: newStatus }).eq('id', record.id);
+        if (saleError) throw saleError;
+        const { error: txnError } = await supabase.from('transactions')
+          .update({ status: newStatus === 'Paid' ? 'Success' : 'Pending' }).eq('ref_id', record.id);
+        if (txnError) throw txnError;
+
+        setSales(prev => prev.map(s => s.id === record.id ? { ...s, paidAmount: newPaid, status: newStatus } : s));
+        setTransactions(prev => prev.map(t => t.refId === record.id ? { ...t, status: newStatus === 'Paid' ? 'Success' : 'Pending' } : t));
+
+        // Cash actually came in from the customer.
+        await adjustCashBalance(actuallyApplied);
+      } else {
+        const total = record.totalAmount;
+        const oldPaid = record.paidAmount ?? 0;
+        const newPaid = Math.min(oldPaid + paymentNow, total);
+        const actuallyApplied = newPaid - oldPaid;
+        const newStatus = newPaid >= total ? 'Paid' : 'Partial';
+
+        const { error } = await supabase.from('purchases').update({ paid_amount: newPaid, status: newStatus }).eq('id', record.id);
+        if (error) throw error;
+
+        setPurchases(prev => prev.map(p => p.id === record.id ? { ...p, paidAmount: newPaid, status: newStatus, dueAmount: Math.max(0, total - newPaid) } : p));
+
+        // Cash actually went out to the supplier.
+        await adjustCashBalance(-actuallyApplied);
+      }
+      setPaymentModal(null);
+      setPaymentAmountInput('');
+    } catch (err) {
+      alert('Could not record payment — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
+  const handleSaveAddMoney = async (e) => {
+    e.preventDefault();
+    const amount = parseFloat(addMoneyForm.amount) || 0;
+    if (amount <= 0) return alert('Enter an amount greater than 0.');
+
+    try {
+      const newEntry = {
+        id: await nextSequentialId(transactions.map(t => t.id), 'TXN', 'TXN-'),
+        type: 'Capital',
+        amount,
+        category: 'Owner Investment',
+        note: addMoneyForm.note || '',
+        status: 'Success',
+        date: addMoneyForm.date || new Date().toISOString().split('T')[0],
+      };
+      const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newEntry));
+      if (error) throw error;
+      setTransactions(prev => [newEntry, ...prev]);
+
+      const ok = await adjustCashBalance(amount);
+      if (!ok) {
+        // Balance update failed but the log entry is already saved — let them know
+        // the money-in was recorded even though the running total didn't move.
+        alert('Money-in was logged, but the balance total could not be updated. Please refresh.');
+      }
+
+      setShowAddMoneyModal(false);
+      setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+    } catch (err) {
+      alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
+  const openReturnModal = (sale) => {
+    setReturnModal(sale);
+    setReturnQtyInputs({});
+  };
+
+  const submitProcessReturn = async (e) => {
+    e.preventDefault();
+    if (!returnModal) return;
+    const sale = returnModal;
+
+    const entries = Object.entries(returnQtyInputs)
+      .map(([idx, val]) => ({ idx: parseInt(idx, 10), qty: parseInt(val, 10) || 0 }))
+      .filter(e => e.qty > 0);
+    if (entries.length === 0) return alert('Enter a quantity to return for at least one item.');
+
+    // Build the updated items array, clamping each return to what's actually left to return.
+    let returnValue = 0;
+    let returnCost = 0;
+    const stockBumps = []; // { productId, qty }
+    const updatedItems = sale.items.map((item, idx) => {
+      const entry = entries.find(e => e.idx === idx);
+      if (!entry) return item;
+      const alreadyReturned = item.returnedQty || 0;
+      const remaining = item.qty - alreadyReturned;
+      const returningNow = Math.min(entry.qty, remaining);
+      if (returningNow <= 0) return item;
+      returnValue += returningNow * item.sellPrice;
+      returnCost += returningNow * (item.buyPrice || 0);
+      if (item.productId) stockBumps.push({ productId: item.productId, qty: returningNow });
+      return { ...item, returnedQty: alreadyReturned + returningNow };
+    });
+
+    if (returnValue <= 0) return alert('Enter a quantity to return for at least one item.');
+
+    const newSubtotal = Math.max(0, sale.subtotal - returnValue);
+    const newDiscount = Math.min(sale.discount || 0, newSubtotal);
+    const newTotalSellAmount = Math.max(0, newSubtotal - newDiscount);
+    const newTotalCostAmount = Math.max(0, sale.totalCostAmount - returnCost);
+    const oldPaid = sale.paidAmount ?? 0;
+    const cashRefund = Math.max(0, oldPaid - newTotalSellAmount);
+    const newPaid = oldPaid - cashRefund;
+    const newStatus = newTotalSellAmount <= 0 ? 'Paid' : (newPaid >= newTotalSellAmount ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Due'));
+
+    try {
+      // Restock every returned product.
+      const stockUpdates = stockBumps.map(b => {
+        const prod = products.find(p => p.id === b.productId);
+        return prod ? { productId: b.productId, newStock: prod.stock + b.qty } : null;
+      }).filter(Boolean);
+      await Promise.all(stockUpdates.map(u => supabase.from('products').update({ stock: u.newStock }).eq('id', u.productId)));
+
+      const { error: saleError } = await supabase.from('sales').update({
+        items: updatedItems, subtotal: newSubtotal, discount: newDiscount,
+        total_sell_amount: newTotalSellAmount, total_cost_amount: newTotalCostAmount,
+        paid_amount: newPaid, status: newStatus,
+      }).eq('id', sale.id);
+      if (saleError) throw saleError;
+
+      const { error: txnError } = await supabase.from('transactions')
+        .update({ amount: newTotalSellAmount, status: newStatus === 'Paid' ? 'Success' : 'Pending' })
+        .eq('ref_id', sale.id);
+      if (txnError) throw txnError;
+
+      setProducts(prev => prev.map(p => {
+        const u = stockUpdates.find(s => s.productId === p.id);
+        return u ? { ...p, stock: u.newStock } : p;
+      }));
+      const updatedSale = {
+        ...sale, items: updatedItems, subtotal: newSubtotal, discount: newDiscount,
+        totalSellAmount: newTotalSellAmount, totalCostAmount: newTotalCostAmount,
+        paidAmount: newPaid, status: newStatus,
+      };
+      setSales(prev => prev.map(s => s.id === sale.id ? updatedSale : s));
+      setTransactions(prev => prev.map(t => t.refId === sale.id ? { ...t, amount: newTotalSellAmount, status: newStatus === 'Paid' ? 'Success' : 'Pending' } : t));
+
+      // If the customer had already paid for what they're now returning, that cash goes back to them.
+      if (cashRefund > 0) await adjustCashBalance(-cashRefund);
+
+      setReturnModal(null);
+      setReturnQtyInputs({});
+    } catch (err) {
+      alert('Could not process the return — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
+  const handleCloseTill = async (e) => {
+    e.preventDefault();
+    const counted = parseFloat(closeTillForm.countedAmount);
+    if (isNaN(counted) || counted < 0) return alert('Enter the amount actually counted in the till.');
+
+    const expected = shopSettings.cashBalance || 0;
+    const difference = counted - expected; // positive = overage, negative = shortage
+
+    try {
+      if (difference !== 0) {
+        const entry = {
+          id: await nextSequentialId(transactions.map(t => t.id), 'TXN', 'TXN-'),
+          type: difference > 0 ? 'Capital' : 'Expense',
+          amount: Math.abs(difference),
+          category: 'Till Reconciliation',
+          note: closeTillForm.note || `Till count: Tk ${counted.toLocaleString()} vs expected Tk ${expected.toLocaleString()}`,
+          status: 'Success',
+          date: new Date().toISOString().split('T')[0],
+        };
+        const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(entry));
+        if (error) throw error;
+        setTransactions(prev => [entry, ...prev]);
+      }
+      // Either way, the balance now reflects what was actually counted.
+      await adjustCashBalance(difference);
+
+      setShowCloseTillModal(false);
+      setCloseTillForm({ countedAmount: '', note: '' });
+      if (difference === 0) {
+        alert('Till matches exactly — nice.');
+      } else {
+        alert(`Till closed. ${difference > 0 ? 'Overage' : 'Shortage'} of Tk ${Math.abs(difference).toLocaleString()} logged and balance updated.`);
+      }
+    } catch (err) {
+      alert('Could not close the till — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
+
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
@@ -556,6 +800,25 @@ export default function App() {
       alert('Settings updated successfully!');
     } catch (err) {
       alert('Could not save settings: ' + (err.message || 'unknown error'));
+    }
+  };
+
+  // Business cash balance — "money I actually have on hand". Adjusted automatically by
+  // Expenses (deduct), "Add Money" top-ups (add), and Due payments collected/paid (add/deduct).
+  // Positive delta = cash coming in, negative delta = cash going out.
+  const adjustCashBalance = async (delta) => {
+    const newBalance = Math.round(((shopSettings.cashBalance || 0) + delta) * 100) / 100;
+    const previousBalance = shopSettings.cashBalance || 0;
+    setShopSettings(prev => ({ ...prev, cashBalance: newBalance }));
+    try {
+      const { error } = await supabase.from('shop_settings').update({ cash_balance: newBalance }).eq('user_id', session.user.id);
+      if (error) throw error;
+      return true;
+    } catch (err) {
+      // Roll back the optimistic update so the on-screen balance never drifts from the database.
+      setShopSettings(prev => ({ ...prev, cashBalance: previousBalance }));
+      alert('Could not update balance — ' + (err.message || 'please check your internet connection and try again.'));
+      return false;
     }
   };
 
@@ -855,6 +1118,10 @@ export default function App() {
             const u = stockUpdates.find(s => s.productId === p.id);
             return u ? { ...p, stock: u.newStock, lastSoldAt: u.lastSoldAt } : p;
           }));
+
+          // Cash on hand moves by however much the paid amount changed on this edit.
+          const paidDelta = saleRecord.paidAmount - (editingItem.paidAmount ?? 0);
+          if (paidDelta !== 0) await adjustCashBalance(paidDelta);
         } else {
           const { error: saleError } = await supabase.from('sales').insert(dbMap.sale.toDb(saleRecord));
           if (saleError) throw saleError;
@@ -878,6 +1145,9 @@ export default function App() {
             return u ? { ...p, stock: u.newStock, lastSoldAt: u.lastSoldAt } : p;
           }));
           setTransactions([autoTransaction, ...transactions]);
+
+          // Whatever was actually paid right now (full, partial, or 0 for a due sale) hits the cash balance.
+          if (saleRecord.paidAmount > 0) await adjustCashBalance(saleRecord.paidAmount);
         }
 
       } else if (activeTab === 'Categories') {
@@ -1014,11 +1284,19 @@ export default function App() {
           const { error } = await supabase.from('purchases').update(dbMap.purchase.toDb(purchaseRecord)).eq('id', editingItem.id);
           if (error) throw error;
           setPurchases(purchases.map(p => p.id === editingItem.id ? { ...purchaseRecord, dueAmount: Math.max(0, totalAmount - paidAmount) } : p));
+
+          // Cash on hand moves by however much the paid amount changed on this edit.
+          const paidDelta = paidAmount - (editingItem.paidAmount ?? 0);
+          if (paidDelta !== 0) await adjustCashBalance(-paidDelta);
         } else {
           const { error } = await supabase.from('purchases').insert(dbMap.purchase.toDb(purchaseRecord));
           if (error) throw error;
           setPurchases([{ ...purchaseRecord, dueAmount: Math.max(0, totalAmount - paidAmount) }, ...purchases]);
+
+          // Whatever was actually paid to the supplier right now comes straight out of the cash balance.
+          if (paidAmount > 0) await adjustCashBalance(-paidAmount);
         }
+
 
         // Settle the old due purchases from this supplier now that their balance has
         // been folded into the new record, so they no longer double-count on the Due Amounts page.
@@ -1080,6 +1358,7 @@ export default function App() {
         if (amount <= 0) return alert('Please enter an amount greater than 0.');
 
         if (editingItem) {
+          const oldAmount = editingItem.amount || 0;
           const updated = {
             ...editingItem, type: 'Expense', amount,
             category: formData.category, note: formData.note || '',
@@ -1088,6 +1367,8 @@ export default function App() {
           const { error } = await supabase.from('transactions').update(dbMap.transaction.toDb(updated)).eq('id', editingItem.id);
           if (error) throw error;
           setTransactions(transactions.map(t => t.id === editingItem.id ? updated : t));
+          // Re-deduct only the difference so the balance reflects the corrected amount.
+          if (amount !== oldAmount) await adjustCashBalance(oldAmount - amount);
         } else {
           const newExpense = {
             id: await nextSequentialId(transactions.map(t => t.id), 'TXN', 'TXN-'),
@@ -1099,6 +1380,7 @@ export default function App() {
           const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newExpense));
           if (error) throw error;
           setTransactions([newExpense, ...transactions]);
+          await adjustCashBalance(-amount);
         }
       } else if (activeTab === 'Warehouse') {
         const qty = parseInt(formData.qty, 10) || 0;
@@ -1242,9 +1524,13 @@ export default function App() {
     try {
       const tableMap = { Products: 'products', Sales: 'sales', Categories: 'categories', Customers: 'customers', Suppliers: 'suppliers', Transactions: 'transactions', Expenses: 'transactions', Damaged: 'damaged_products', Purchases: 'purchases', Warehouse: 'warehouse_stock' };
 
+      // Looked up once, up front, so both the stock-restore step below and the
+      // cash-balance-reversal step after the delete can both reference them.
+      const saleToDelete = type === 'Sales' ? sales.find(s => s.id === id) : null;
+      const purchaseToDelete = type === 'Purchases' ? purchases.find(p => p.id === id) : null;
+
       if (type === 'Sales') {
         // Put the sold quantities back into inventory before removing the sale record.
-        const saleToDelete = sales.find(s => s.id === id);
         if (saleToDelete) {
           const restoredProducts = products.map(p => {
             const soldItem = saleToDelete.items.find(i => i.productId === p.id);
@@ -1284,15 +1570,30 @@ export default function App() {
         await supabase.from('transactions').delete().eq('ref_id', id);
         setSales(sales.filter(s => s.id !== id));
         setTransactions(transactions.filter(t => t.refId !== id && t.id !== `TXN-${id.replace('#', '')}`));
+        // Whatever cash this sale had brought in comes back out of the balance.
+        if (saleToDelete && saleToDelete.paidAmount > 0) await adjustCashBalance(-saleToDelete.paidAmount);
       }
       if (type === 'Categories') setCategories(categories.filter(c => c.id !== id));
       if (type === 'Customers') setCustomers(customers.filter(c => c.id !== id));
       if (type === 'Suppliers') setSuppliers(suppliers.filter(s => s.id !== id));
       if (type === 'Transactions') setTransactions(transactions.filter(t => t.id !== id));
-      if (type === 'Expenses') setTransactions(transactions.filter(t => t.id !== id));
+      if (type === 'Expenses') {
+        setTransactions(transactions.filter(t => t.id !== id));
+        // This deleted transaction could be an Expense (deducted balance) or a Capital
+        // entry (added to balance) — either way, undo exactly what it did.
+        const deletedTxn = transactions.find(t => t.id === id);
+        if (deletedTxn) {
+          if (deletedTxn.type === 'Expense') await adjustCashBalance(deletedTxn.amount);
+          else if (deletedTxn.type === 'Capital') await adjustCashBalance(-deletedTxn.amount);
+        }
+      }
       if (type === 'Warehouse') setWarehouseStock(warehouseStock.filter(w => w.id !== id));
       if (type === 'Damaged') setDamagedProducts(damagedProducts.filter(d => d.id !== id));
-      if (type === 'Purchases') setPurchases(purchases.filter(p => p.id !== id));
+      if (type === 'Purchases') {
+        setPurchases(purchases.filter(p => p.id !== id));
+        // Whatever cash this purchase had paid out to the supplier comes back into the balance.
+        if (purchaseToDelete && purchaseToDelete.paidAmount > 0) await adjustCashBalance(purchaseToDelete.paidAmount);
+      }
       setDeleteConfirm(null);
     } catch (err) {
       alert('Could not delete — ' + (err.message || 'please check your internet connection and try again.'));
@@ -1323,7 +1624,7 @@ export default function App() {
   };
 
   // --- FREE BACKUP: Export all app data to a JSON file the user saves themselves ---
-  const handleExportData = () => {
+  const handleExportData = async () => {
     const backup = {
       exportedAt: new Date().toISOString(),
       shopName: shopSettings.shopName,
@@ -1347,6 +1648,11 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
+    // Record when this happened, so the "backup reminder" banner knows to stay quiet for a while.
+    const nowIso = new Date().toISOString();
+    setShopSettings(prev => ({ ...prev, lastBackupAt: nowIso }));
+    await supabase.from('shop_settings').update({ last_backup_at: nowIso }).eq('user_id', session.user.id);
   };
 
   // --- FREE RESTORE: Import a previously exported JSON backup file ---
@@ -1599,8 +1905,13 @@ export default function App() {
   };
 
   // Calculations
-  const totalSellAmount = sales.reduce((sum, sale) => sum + sale.totalSellAmount, 0);
-  const costOfGoodsSold = sales.reduce((sum, sale) => sum + sale.totalCostAmount, 0);
+  // "Previous Due" entries (id starts with #DUE-) record old debt from before this software
+  // was in use — they're real for Due Amounts tracking, but must NOT count as new sales
+  // revenue/profit, or they inflate performance numbers and pollute Best Sellers with a
+  // fake "product" called "Previous Due (Opening Balance)".
+  const realSales = sales.filter(s => !(s.id || '').startsWith('#DUE-'));
+  const totalSellAmount = realSales.reduce((sum, sale) => sum + sale.totalSellAmount, 0);
+  const costOfGoodsSold = realSales.reduce((sum, sale) => sum + sale.totalCostAmount, 0);
   const netProfit = totalSellAmount - costOfGoodsSold;
   const currentInventoryValue = products.reduce((sum, p) => sum + (p.buyPrice * p.stock), 0);
   const lowStockProducts = products.filter(p => p.active !== false && p.stock <= (p.reorderLevel || 5));
@@ -1608,12 +1919,36 @@ export default function App() {
   const totalStockUnits = products.reduce((sum, p) => sum + (p.stock || 0), 0);
   const [showLowStock, setShowLowStock] = useState(false);
 
+  // Backup reminder — nudge if it's been a while (or never) since the last export.
+  const daysSinceBackup = shopSettings.lastBackupAt
+    ? Math.floor((Date.now() - new Date(shopSettings.lastBackupAt).getTime()) / (1000 * 60 * 60 * 24))
+    : null;
+  const backupIsOverdue = daysSinceBackup === null || daysSinceBackup >= 7;
+
+  // Dashboard "Monthly Revenue Overview" — the last 6 calendar months of real sales,
+  // built from actual sale dates instead of the old hardcoded sample numbers.
+  const monthlyRevenueData = (() => {
+    const months = [];
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({ key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, month: d.toLocaleString('en-US', { month: 'short' }), sales: 0 });
+    }
+    sales.forEach(s => {
+      if (!s.date || (s.id || '').startsWith('#DUE-')) return;
+      const key = s.date.slice(0, 7);
+      const bucket = months.find(m => m.key === key);
+      if (bucket) bucket.sales += s.totalSellAmount;
+    });
+    return months;
+  })();
+
   // Safe lookup map used by the generic tables instead of eval()
   const genericDataMap = { categories, customers, suppliers, damaged: damagedProducts, purchases };
 
   // --- Daily Report: sales, purchases, and profit grouped by calendar day ---
   const dailyStatsFor = (dateStr) => {
-    const daySales = sales.filter(s => s.date === dateStr);
+    const daySales = sales.filter(s => s.date === dateStr && !(s.id || '').startsWith('#DUE-'));
     const salesFullyPaid = daySales.filter(s => s.status === 'Paid');
     const salesWithDue = daySales.filter(s => s.status !== 'Paid'); // Due or Partial
 
@@ -1666,6 +2001,11 @@ export default function App() {
     return acc;
   }, {});
   const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
+
+  // --- Money added to the business (capital injections logged via "Add Money") ---
+  const capitalTransactions = transactions
+    .filter(t => t.type === 'Capital')
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   // --- Due Amounts: customer dues come from sales that aren't fully paid,
   // vendor dues come from purchases that aren't fully paid to the supplier. ---
@@ -1777,7 +2117,7 @@ export default function App() {
   // --- Dashboard insights ---
   const bestSellers = (() => {
     const totalsByProduct = {};
-    sales.forEach(s => s.items.forEach(i => {
+    realSales.forEach(s => s.items.forEach(i => {
       totalsByProduct[i.productId] = totalsByProduct[i.productId] || { name: i.productName, qty: 0, revenue: 0 };
       totalsByProduct[i.productId].qty += i.qty;
       totalsByProduct[i.productId].revenue += i.lineTotal;
@@ -1785,7 +2125,7 @@ export default function App() {
     return Object.values(totalsByProduct).sort((a, b) => b.qty - a.qty).slice(0, 5);
   })();
 
-  const recentSales = [...sales].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+  const recentSales = [...realSales].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
 
   const navItems = [
     { name: 'Dashboard', icon: Home }, { name: 'Products', icon: Box },
@@ -2064,6 +2404,27 @@ export default function App() {
           </div>
         )}
 
+        {/* Backup Reminder Banner — nudges when it's been a week+ (or never) since the last export */}
+        {backupIsOverdue && activeTab === 'Dashboard' && (
+          <div className="mb-8 bg-blue-50 border border-blue-200 rounded-2xl p-5 no-print flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <Download className="w-6 h-6 text-blue-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-blue-900 font-bold text-base">
+                  {daysSinceBackup === null ? "You haven't backed up your data yet" : `It's been ${daysSinceBackup} day${daysSinceBackup !== 1 ? 's' : ''} since your last backup`}
+                </h4>
+                <p className="text-blue-700 text-sm mt-1">Export a copy regularly so a lost device or browser issue never costs you your records.</p>
+              </div>
+            </div>
+            <button
+              onClick={handleExportData}
+              className="bg-blue-600 text-white text-sm font-bold px-5 py-2.5 rounded-xl flex items-center gap-2 hover:bg-blue-700 shadow-sm transition-all shrink-0"
+            >
+              <Download className="w-4 h-4" /> Backup Now
+            </button>
+          </div>
+        )}
+
         {/* Dynamic Add / Edit Modal */}
         {showModal && (
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
@@ -2130,7 +2491,20 @@ export default function App() {
                       <input name="customerPhone" defaultValue={formData.customerPhone || ''} placeholder="Customer Phone" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     </div>
                     <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    
+
+                    <div className="relative mb-4">
+                      <Calendar className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        name="date"
+                        type="date"
+                        defaultValue={formData.date || new Date().toISOString().split('T')[0]}
+                        onChange={handleInputChange}
+                        max={new Date().toISOString().split('T')[0]}
+                        className="w-full pl-9 pr-3 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
+                      <p className="text-[11px] text-[var(--text-muted)] mt-1">Defaults to today — change this if you're catching up on a sale from an earlier day.</p>
+                    </div>
+
                     <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
                       <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
                       {cartItems.map((item, idx) => {
@@ -2634,6 +3008,285 @@ export default function App() {
           </div>
         )}
 
+        {/* ADD PREVIOUS DUE MODAL — records a customer's pre-existing balance without a real sale */}
+        {showPreviousDueModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm p-4 no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-6 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] md:w-[420px]">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
+                  <Wallet className="w-5 h-5 text-blue-600" /> Add Previous Due
+                </h3>
+                <button onClick={() => setShowPreviousDueModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+              <p className="text-xs text-[var(--text-muted)] mb-4">
+                Records money a customer already owed you before you started using this app — no product sale needed, just the amount and who owes it.
+              </p>
+
+              <form onSubmit={handleSavePreviousDue} className="space-y-3">
+                <input
+                  required
+                  value={previousDueForm.customer}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customer: e.target.value })}
+                  placeholder="Customer Name"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  value={previousDueForm.customerPhone}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, customerPhone: e.target.value })}
+                  placeholder="Phone Number (optional)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  required
+                  type="number" step="0.01" min="0.01"
+                  value={previousDueForm.amount}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, amount: e.target.value })}
+                  placeholder="Amount Owed (Tk)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  type="date"
+                  value={previousDueForm.date}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, date: e.target.value })}
+                  max={new Date().toISOString().split('T')[0]}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  value={previousDueForm.note}
+                  onChange={(e) => setPreviousDueForm({ ...previousDueForm, note: e.target.value })}
+                  placeholder="Note (optional — e.g. 'Opening balance from notebook')"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+
+                <div className="flex justify-end gap-3 pt-3 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setShowPreviousDueModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700">Save Due</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* RECORD PAYMENT MODAL — a fast, dedicated way to log a partial or full payment
+           against a due sale/purchase from the Due Amounts page, without opening the full editor. */}
+        {paymentModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[420px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Record Payment</h3>
+                <button onClick={() => setPaymentModal(null)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+
+              <form onSubmit={submitRecordPayment} className="space-y-4 text-sm">
+                {(() => {
+                  const { kind, record } = paymentModal;
+                  const total = kind === 'customer' ? record.totalSellAmount : record.totalAmount;
+                  const paid = record.paidAmount ?? 0;
+                  const due = Math.max(0, total - paid);
+                  return (
+                    <div className="bg-[var(--bg-hover)] rounded-xl p-4 border border-[var(--border-card)] space-y-1">
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">{kind === 'customer' ? 'Customer' : 'Supplier'}</span><span className="font-bold text-[var(--text-primary)]">{kind === 'customer' ? record.customer : record.supplier}</span></div>
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">{kind === 'customer' ? 'Order' : 'Purchase'} ID</span><span className="font-bold text-orange-600">{record.id}</span></div>
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">Total</span><span className="text-[var(--text-primary)]">Tk {total.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">Already Paid</span><span className="text-emerald-700">Tk {paid.toLocaleString()}</span></div>
+                      <div className="flex justify-between pt-1 mt-1 border-t border-[var(--border-card)]"><span className="font-bold text-[var(--text-primary)]">Due Now</span><span className="font-black text-red-600">Tk {due.toLocaleString()}</span></div>
+                    </div>
+                  );
+                })()}
+
+                <div>
+                  <label className="block text-[var(--text-secondary)] font-semibold mb-1.5">
+                    {paymentModal.kind === 'customer' ? 'Amount received now' : 'Amount you\'re paying now'}
+                  </label>
+                  <input
+                    required
+                    autoFocus
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={paymentAmountInput}
+                    onChange={(e) => setPaymentAmountInput(e.target.value)}
+                    placeholder="Tk"
+                    className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                  />
+                  <p className="text-[11px] text-[var(--text-muted)] mt-1.5">
+                    {paymentModal.kind === 'customer'
+                      ? "This is added to the sale's paid amount and to your business balance."
+                      : "This is added to the purchase's paid amount and deducted from your business balance."}
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setPaymentModal(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700">Record Payment</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ADD MONEY MODAL — logs a capital injection (owner deposit, loan, etc.) and tops up the business cash balance */}
+        {showAddMoneyModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[420px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Add Money to Balance</h3>
+                <button onClick={() => setShowAddMoneyModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+              <form onSubmit={handleSaveAddMoney} className="space-y-4 text-sm">
+                <input
+                  required autoFocus type="number" step="0.01" min="0.01"
+                  value={addMoneyForm.amount}
+                  onChange={(e) => setAddMoneyForm({ ...addMoneyForm, amount: e.target.value })}
+                  placeholder="Amount (Tk)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                />
+                <input
+                  type="date"
+                  value={addMoneyForm.date}
+                  onChange={(e) => setAddMoneyForm({ ...addMoneyForm, date: e.target.value })}
+                  max={new Date().toISOString().split('T')[0]}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <input
+                  value={addMoneyForm.note}
+                  onChange={(e) => setAddMoneyForm({ ...addMoneyForm, note: e.target.value })}
+                  placeholder="Note (optional — e.g. 'Own savings deposit')"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  This adds straight to your business balance and is logged below so you can always see where it came from.
+                </p>
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setShowAddMoneyModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700">Add Money</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* PROCESS RETURN MODAL — returns some or all items from a past sale: restocks
+           product(s), shrinks the sale's total, and refunds cash if the customer had
+           already paid for what's coming back, without deleting the original sale. */}
+        {returnModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm p-4 no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-6 md:p-8 shadow-2xl border border-[var(--border-card)] w-full max-w-[95vw] md:w-[560px] max-h-[90vh] overflow-y-auto transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <div>
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">Process Return</h3>
+                  <p className="text-xs text-[var(--text-muted)]">{returnModal.id} · {returnModal.customer}</p>
+                </div>
+                <button onClick={() => setReturnModal(null)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+
+              <form onSubmit={submitProcessReturn} className="space-y-4 text-sm">
+                <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+                  {returnModal.items.map((item, idx) => {
+                    const remaining = item.qty - (item.returnedQty || 0);
+                    if (remaining <= 0) return null;
+                    return (
+                      <div key={idx} className="bg-[var(--bg-hover)] rounded-xl p-3 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[var(--text-primary)] truncate">{item.productName}</p>
+                          <p className="text-xs text-[var(--text-muted)]">
+                            Sold {item.qty} @ Tk {item.sellPrice.toLocaleString()}
+                            {item.returnedQty > 0 && ` · ${item.returnedQty} already returned`}
+                            {' · '}{remaining} returnable
+                          </p>
+                        </div>
+                        <input
+                          type="number" min="0" max={remaining}
+                          value={returnQtyInputs[idx] || ''}
+                          onChange={(e) => setReturnQtyInputs({ ...returnQtyInputs, [idx]: e.target.value })}
+                          placeholder="0"
+                          className="w-20 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center font-bold shrink-0"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {(() => {
+                  let refundPreview = 0;
+                  returnModal.items.forEach((item, idx) => {
+                    const remaining = item.qty - (item.returnedQty || 0);
+                    const qty = Math.min(parseInt(returnQtyInputs[idx], 10) || 0, remaining);
+                    refundPreview += qty * item.sellPrice;
+                  });
+                  const oldPaid = returnModal.paidAmount ?? 0;
+                  const newTotal = Math.max(0, returnModal.totalSellAmount - refundPreview);
+                  const cashBack = Math.max(0, oldPaid - newTotal);
+                  if (refundPreview <= 0) return null;
+                  return (
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm space-y-1">
+                      <div className="flex justify-between"><span className="text-blue-700">Value being returned</span><span className="font-bold text-blue-900">Tk {refundPreview.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-blue-700">New sale total</span><span className="font-bold text-blue-900">Tk {newTotal.toLocaleString()}</span></div>
+                      {cashBack > 0 && (
+                        <div className="flex justify-between pt-1 mt-1 border-t border-blue-200"><span className="font-bold text-blue-900">Cash refund to customer</span><span className="font-black text-blue-900">Tk {cashBack.toLocaleString()}</span></div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <p className="text-[11px] text-[var(--text-muted)]">Returned quantities go back into stock automatically. If the customer already paid for these items, that amount comes out of your business balance as a refund.</p>
+
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setReturnModal(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700">Process Return</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* CLOSE TILL MODAL — end-of-day cash count vs. what the system expects */}
+        {showCloseTillModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-[420px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Close Till</h3>
+                <button onClick={() => setShowCloseTillModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+              <form onSubmit={handleCloseTill} className="space-y-4 text-sm">
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4 border border-[var(--border-card)] flex justify-between">
+                  <span className="text-[var(--text-muted)]">System expects</span>
+                  <span className="font-bold text-[var(--text-primary)]">Tk {(shopSettings.cashBalance || 0).toLocaleString()}</span>
+                </div>
+                <div>
+                  <label className="block text-[var(--text-secondary)] font-semibold mb-1.5">Cash actually counted</label>
+                  <input
+                    required autoFocus type="number" step="0.01" min="0"
+                    value={closeTillForm.countedAmount}
+                    onChange={(e) => setCloseTillForm({ ...closeTillForm, countedAmount: e.target.value })}
+                    placeholder="Tk"
+                    className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                  />
+                </div>
+                {closeTillForm.countedAmount !== '' && !isNaN(parseFloat(closeTillForm.countedAmount)) && (() => {
+                  const diff = parseFloat(closeTillForm.countedAmount) - (shopSettings.cashBalance || 0);
+                  if (diff === 0) return <p className="text-emerald-600 text-sm font-semibold">Matches exactly.</p>;
+                  return (
+                    <p className={`text-sm font-semibold ${diff > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {diff > 0 ? `Tk ${diff.toLocaleString()} over` : `Tk ${Math.abs(diff).toLocaleString()} short`} — this will be logged and the balance corrected to match what you counted.
+                    </p>
+                  );
+                })()}
+                <input
+                  value={closeTillForm.note}
+                  onChange={(e) => setCloseTillForm({ ...closeTillForm, note: e.target.value })}
+                  placeholder="Note (optional)"
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setShowCloseTillModal(false)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700">Close Till</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* PRINTABLE INVOICE MODAL — sized for a 2.5in thermal receipt printer */}
         {selectedReceipt && (
           <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center z-50 backdrop-blur-sm p-4 overflow-y-auto">
@@ -2839,7 +3492,7 @@ export default function App() {
                   <span className="w-10 h-10 rounded-xl bg-orange-500/10 flex items-center justify-center"><ShoppingBag className="w-5 h-5 text-orange-500" /></span>
                 </div>
                 <div className="text-3xl font-black text-[var(--text-primary)]">Tk {totalSellAmount.toLocaleString()}</div>
-                <p className="text-xs text-[var(--text-muted)] mt-1">{sales.length} order{sales.length !== 1 ? 's' : ''} recorded</p>
+                <p className="text-xs text-[var(--text-muted)] mt-1">{realSales.length} order{realSales.length !== 1 ? 's' : ''} recorded</p>
               </div>
               <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
                 <div className="flex items-center justify-between mb-3">
@@ -2865,7 +3518,7 @@ export default function App() {
               <h3 className="text-lg font-extrabold text-[var(--text-primary)] mb-6">Monthly Revenue Overview</h3>
               <div className="h-72 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={defaultMonthlySales}>
+                  <BarChart data={monthlyRevenueData}>
                     <XAxis dataKey="month" axisLine={false} tickLine={false} stroke="var(--text-muted)" />
                     <YAxis axisLine={false} tickLine={false} tickFormatter={(val) => `Tk ${val / 1000}k`} stroke="var(--text-muted)" />
                     <Tooltip formatter={(value) => [`Tk ${value.toLocaleString()}`, 'Sales']} contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-card)', borderRadius: '12px', color: 'var(--text-primary)' }} />
@@ -3087,10 +3740,17 @@ export default function App() {
                   <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                     <td className="py-4 font-bold text-orange-600">{s.id}</td>
                     <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">{s.items.length} item(s)</td>
+                    <td className="py-4 text-[var(--text-secondary)]">
+                      {s.items.length} item(s)
+                      {s.items.some(i => (i.returnedQty || 0) > 0) && (
+                        <span className="block text-[11px] text-blue-600 font-semibold">{s.items.reduce((sum, i) => sum + (i.returnedQty || 0), 0)} returned</span>
+                      )}
+                    </td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
                     <td className="py-4">
-                      {due <= 0 ? (
+                      {s.totalSellAmount <= 0 && s.items.some(i => (i.returnedQty || 0) > 0) ? (
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Returned</span>
+                      ) : due <= 0 ? (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${paid.toLocaleString()}`}>
@@ -3101,6 +3761,9 @@ export default function App() {
                     <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
                     <td className="py-4 text-right flex justify-end gap-1">
                       <button onClick={() => setSelectedReceipt(s)} title="View & Print Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                      {!s.id.startsWith('#DUE-') && s.items.some(i => (i.returnedQty || 0) < i.qty) && (
+                        <button onClick={() => openReturnModal(s)} title="Process Return" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Undo2 className="w-4 h-4" /></button>
+                      )}
                       <button onClick={() => handleOpenEdit(s)} title="Edit Sale Record" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(s.id, 'Sales')} title="Delete Sale" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
                     </td>
@@ -3293,18 +3956,35 @@ export default function App() {
                     <tbody className="divide-y divide-[var(--border-card)]">
                       {filteredCustomerDues.map(s => {
                         const paid = s.paidAmount ?? 0;
+                        const overdue = daysOverdue(s.date);
+                        const isOverdue = overdue >= 7;
+                        const reminderLink = buildWhatsAppReminderLink(
+                          s.customerPhone,
+                          `Hi ${s.customer}, this is a reminder from ${shopSettings.shopName} that Tk ${s.dueAmount.toLocaleString()} is still due on order ${s.id}. Please let us know when you can settle it. Thank you!`
+                        );
                         return (
-                          <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                          <tr key={s.id} className={`transition-colors ${isOverdue ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-[var(--bg-hover)]'}`}>
                             <td className="py-4 font-bold text-orange-600">{s.id}</td>
                             <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
                             <td className="py-4 text-[var(--text-secondary)]">{s.customerPhone || '—'}</td>
                             <td className="py-4 text-[var(--text-secondary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
                             <td className="py-4 text-emerald-700">Tk {paid.toLocaleString()}</td>
                             <td className="py-4 font-black text-red-600">Tk {s.dueAmount.toLocaleString()}</td>
-                            <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
+                            <td className="py-4 text-[var(--text-muted)]">
+                              {s.date}
+                              {isOverdue && (
+                                <span className="flex items-center gap-1 text-[11px] font-bold text-red-600 mt-0.5">
+                                  <AlertOctagon className="w-3 h-3" /> {overdue}d overdue
+                                </span>
+                              )}
+                            </td>
                             <td className="py-4 text-right flex justify-end gap-1">
                               <button onClick={() => setSelectedReceipt(s)} title="View Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                              <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                              {reminderLink && (
+                                <a href={reminderLink} target="_blank" rel="noopener noreferrer" title="Send WhatsApp Reminder" className="text-[var(--text-muted)] hover:text-emerald-600 p-2 inline-flex"><MessageCircle className="w-4 h-4" /></a>
+                              )}
+                              <button onClick={() => openPaymentModal('customer', s)} title="Record Payment" className="text-[var(--text-muted)] hover:text-emerald-600 p-2"><Banknote className="w-4 h-4" /></button>
+                              <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(s); }} title="Edit Full Sale" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                             </td>
                           </tr>
                         );
@@ -3323,21 +4003,33 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-card)]">
-                      {filteredVendorDues.map(p => (
-                        <tr key={p.id} className="hover:bg-[var(--bg-hover)] transition-colors">
+                      {filteredVendorDues.map(p => {
+                        const overdue = daysOverdue(p.date);
+                        const isOverdue = overdue >= 7;
+                        return (
+                        <tr key={p.id} className={`transition-colors ${isOverdue ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-[var(--bg-hover)]'}`}>
                           <td className="py-4 font-bold text-orange-600">{p.id}</td>
                           <td className="py-4 font-medium text-[var(--text-primary)]">{p.supplier}</td>
                           <td className="py-4 text-[var(--text-secondary)]">{(p.items || []).map(i => i.productName).join(', ') || '—'}</td>
                           <td className="py-4 text-[var(--text-secondary)]">Tk {p.totalAmount.toLocaleString()}</td>
                           <td className="py-4 text-emerald-700">Tk {p.paidAmount.toLocaleString()}</td>
                           <td className="py-4 font-black text-red-600">Tk {p.dueAmount.toLocaleString()}</td>
-                          <td className="py-4 text-[var(--text-muted)]">{p.date}</td>
+                          <td className="py-4 text-[var(--text-muted)]">
+                            {p.date}
+                            {isOverdue && (
+                              <span className="flex items-center gap-1 text-[11px] font-bold text-red-600 mt-0.5">
+                                <AlertOctagon className="w-3 h-3" /> {overdue}d overdue
+                              </span>
+                            )}
+                          </td>
                           <td className="py-4 text-right flex justify-end gap-1">
                             <button onClick={() => setSelectedPurchaseReceipt(p)} title="View Receipt" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                            <button onClick={() => { setActiveTab('Purchases'); handleOpenEdit(p); }} title="Update Payment" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => openPaymentModal('vendor', p)} title="Record Payment" className="text-[var(--text-muted)] hover:text-emerald-600 p-2"><Banknote className="w-4 h-4" /></button>
+                            <button onClick={() => { setActiveTab('Purchases'); handleOpenEdit(p); }} title="Edit Full Purchase" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 )
@@ -3712,6 +4404,28 @@ export default function App() {
         {/* EXPENSES TAB — operating costs (food, delivery, rent, etc) tracked separately from COGS */}
         {activeTab === 'Expenses' && (
           <div className="space-y-6">
+            <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-2xl p-6 shadow-lg text-white flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold text-emerald-100 mb-1 uppercase tracking-wide">Business Balance</p>
+                <p className="text-3xl font-black">Tk {(shopSettings.cashBalance || 0).toLocaleString()}</p>
+                <p className="text-xs text-emerald-100 mt-1">Money you have on hand right now — expenses deduct from this automatically.</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => { setCloseTillForm({ countedAmount: '', note: '' }); setShowCloseTillModal(true); }}
+                  className="bg-emerald-800/40 border border-white/30 text-white font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-800/60 transition-colors"
+                >
+                  <Calculator className="w-5 h-5" /> Close Till
+                </button>
+                <button
+                  onClick={() => { setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] }); setShowAddMoneyModal(true); }}
+                  className="bg-white text-emerald-700 font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-50 transition-colors"
+                >
+                  <Banknote className="w-5 h-5" /> Add Money
+                </button>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
                 <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Today</p>
@@ -3735,6 +4449,26 @@ export default function App() {
                     <div key={cat} className="bg-[var(--bg-hover)] rounded-xl p-3">
                       <p className="text-[11px] font-semibold text-[var(--text-muted)] truncate">{cat}</p>
                       <p className="text-sm font-bold text-[var(--text-primary)]">Tk {amt.toLocaleString()}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {capitalTransactions.length > 0 && (
+              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">Money Added to Balance</p>
+                <div className="divide-y divide-[var(--border-card)]">
+                  {capitalTransactions.map(t => (
+                    <div key={t.id} className="flex items-center justify-between py-2.5 text-sm">
+                      <div>
+                        <p className="font-medium text-[var(--text-primary)]">{t.note || 'Money added'}</p>
+                        <p className="text-[var(--text-muted)] text-xs">{t.date}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="font-bold text-emerald-600">+ Tk {t.amount.toLocaleString()}</span>
+                        <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-1"><Trash2 className="w-4 h-4" /></button>
+                      </div>
                     </div>
                   ))}
                 </div>
