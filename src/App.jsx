@@ -491,6 +491,7 @@ export default function App() {
 
   // Category-wise browsing: which category is currently selected for filtering the Products list
   const [productCategoryFilter, setProductCategoryFilter] = useState('');
+  const [transactionTypeFilter, setTransactionTypeFilter] = useState('All'); // 'All' | 'Retail' | 'Wholesale'
   // Due Amounts tab: which side is showing — customer dues or vendor dues
   const [dueView, setDueView] = useState('customer');
   const [dueDateFrom, setDueDateFrom] = useState('');
@@ -525,8 +526,7 @@ export default function App() {
   const [showCloseTillModal, setShowCloseTillModal] = useState(false);
   const [closeTillForm, setCloseTillForm] = useState({ countedAmount: '', note: '' });
 
-  // Promotions page — build a WhatsApp promo message for a newly-arrived product and
-  // click through your customer list to send it. WhatsApp has no bulk-send API for a
+  // Promotions page — build a WhatsApp promo message for a newly-arrived product and  // click through your customer list to send it. WhatsApp has no bulk-send API for a
   // personal account, so this is a "generate links, click each one" workflow.
   const [promoProductId, setPromoProductId] = useState('');
   const [promoMessage, setPromoMessage] = useState('');
@@ -2004,7 +2004,7 @@ export default function App() {
   const daysSinceBackup = shopSettings.lastBackupAt
     ? Math.floor((Date.now() - new Date(shopSettings.lastBackupAt).getTime()) / (1000 * 60 * 60 * 24))
     : null;
-  const backupIsOverdue = daysSinceBackup === null || daysSinceBackup >= 7;
+  const backupIsOverdue = daysSinceBackup === null || daysSinceBackup >= 1;
 
   // Dashboard "Monthly Revenue Overview" — the last 6 calendar months of real sales,
   // built from actual sale dates instead of the old hardcoded sample numbers.
@@ -2082,6 +2082,15 @@ export default function App() {
     return acc;
   }, {});
   const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
+
+  // --- Retail vs. Wholesale breakdown, for the Reports page ---
+  const retailSales = realSales.filter(s => (s.saleType || 'Retail') === 'Retail');
+  const wholesaleSales = realSales.filter(s => s.saleType === 'Wholesale');
+  const retailRevenue = retailSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const retailProfit = retailSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const wholesaleRevenue = wholesaleSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const wholesaleProfit = wholesaleSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const capitalTotal = transactions.filter(t => t.type === 'Capital').reduce((sum, t) => sum + t.amount, 0);
 
   // --- Money added to the business (capital injections logged via "Add Money") ---
   const capitalTransactions = transactions
@@ -2185,25 +2194,34 @@ export default function App() {
     const sale = salesById[t.refId];
     return sale ? sale.totalSellAmount - sale.totalCostAmount : null;
   };
-  const filteredTransactions = transactions.filter(t =>
-    !currentSearch ||
-    (t.id || '').toLowerCase().includes(currentSearch) ||
-    (t.refId || '').toLowerCase().includes(currentSearch) ||
-    (t.type || '').toLowerCase().includes(currentSearch)
-  );
+  const filteredTransactions = transactions
+    .filter(t =>
+      !currentSearch ||
+      (t.id || '').toLowerCase().includes(currentSearch) ||
+      (t.refId || '').toLowerCase().includes(currentSearch) ||
+      (t.type || '').toLowerCase().includes(currentSearch) ||
+      (salesById[t.refId]?.customer || '').toLowerCase().includes(currentSearch)
+    )
+    .filter(t => {
+      if (transactionTypeFilter === 'All') return true;
+      const linkedSale = t.type === 'Income' ? salesById[t.refId] : null;
+      return linkedSale && (linkedSale.saleType || 'Retail') === transactionTypeFilter;
+    });
   const filteredGenericRows = (list) => (list || []).filter(item =>
     !currentSearch || Object.values(item).some(v => String(v).toLowerCase().includes(currentSearch))
   );
 
   // --- Dashboard insights ---
-  const bestSellers = (() => {
+  const allSoldProducts = (() => {
     const totalsByProduct = {};
     realSales.forEach(s => s.items.forEach(i => {
-      totalsByProduct[i.productId] = totalsByProduct[i.productId] || { name: i.productName, qty: 0, revenue: 0 };
+      totalsByProduct[i.productId] = totalsByProduct[i.productId] || { productId: i.productId, name: i.productName, qty: 0, revenue: 0 };
       totalsByProduct[i.productId].qty += i.qty;
       totalsByProduct[i.productId].revenue += i.lineTotal;
     }));
-    return Object.values(totalsByProduct).sort((a, b) => b.qty - a.qty).slice(0, 5);
+    return Object.values(totalsByProduct)
+      .map(p => ({ ...p, currentStock: products.find(prod => prod.id === p.productId)?.stock ?? null }))
+      .sort((a, b) => b.qty - a.qty);
   })();
 
   const recentSales = [...realSales].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
@@ -3478,18 +3496,23 @@ export default function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
-                <h3 className="flex items-center gap-2 text-base font-extrabold text-[var(--text-primary)] mb-4"><Award className="w-4.5 h-4.5 text-orange-500" /> Best Selling Products</h3>
-                {bestSellers.length === 0 ? (
-                  <p className="text-sm text-[var(--text-muted)] py-6 text-center">No sales yet — your top products will show up here.</p>
+                <h3 className="flex items-center gap-2 text-base font-extrabold text-[var(--text-primary)] mb-4"><Award className="w-4.5 h-4.5 text-orange-500" /> All Sold Products <span className="text-xs font-semibold text-[var(--text-muted)]">({allSoldProducts.length})</span></h3>
+                {allSoldProducts.length === 0 ? (
+                  <p className="text-sm text-[var(--text-muted)] py-6 text-center">No sales yet — your sold products will show up here.</p>
                 ) : (
-                  <div className="space-y-3">
-                    {bestSellers.map((p, idx) => (
-                      <div key={idx} className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <span className="w-7 h-7 rounded-lg bg-orange-500/10 text-orange-600 text-xs font-black flex items-center justify-center">{idx + 1}</span>
-                          <span className="text-sm font-semibold text-[var(--text-primary)]">{p.name}</span>
+                  <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+                    {allSoldProducts.map((p, idx) => (
+                      <div key={idx} className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="w-7 h-7 rounded-lg bg-orange-500/10 text-orange-600 text-xs font-black flex items-center justify-center shrink-0">{idx + 1}</span>
+                          <div className="min-w-0">
+                            <span className="text-sm font-semibold text-[var(--text-primary)] block truncate">{p.name}</span>
+                            {p.currentStock !== null && (
+                              <span className={`text-[11px] font-semibold ${p.currentStock <= 0 ? 'text-red-600' : 'text-[var(--text-muted)]'}`}>{p.currentStock} in stock now</span>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right shrink-0">
                           <p className="text-sm font-bold text-[var(--text-primary)]">{p.qty} sold</p>
                           <p className="text-xs text-[var(--text-muted)]">Tk {p.revenue.toLocaleString()}</p>
                         </div>
@@ -3676,40 +3699,41 @@ export default function App() {
            now live on the Transactions page; this tab is purely for entering a new sale
            (or editing one, when arrived at via "Edit Sale" from Transactions/Due Amounts). */}
         {activeTab === 'Sales' && (
-          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 md:p-8 shadow-sm transition-colors max-w-3xl mx-auto">
-            <div className="flex justify-between items-center mb-6">
-              <div>
-                <h3 className="text-xl font-bold text-[var(--text-primary)]">{editingItem ? `Edit Sale ${editingItem.id}` : 'New Sale'}</h3>
-                <p className="text-xs text-[var(--text-muted)] mt-0.5">Full sale history, receipts and returns are on the Transactions page.</p>
+          <form onSubmit={handleSaveItem} className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6 items-start">
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 md:p-8 shadow-sm transition-colors space-y-4 text-sm">
+              <div className="flex justify-between items-center mb-2">
+                <div>
+                  <h3 className="text-xl font-bold text-[var(--text-primary)]">{editingItem ? `Edit Sale ${editingItem.id}` : 'New Sale'}</h3>
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">Full sale history, receipts and returns are on the Transactions page.</p>
+                </div>
+                {editingItem && (
+                  <button type="button" onClick={resetSaleForm} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline shrink-0">
+                    <Plus className="w-4 h-4" /> New Sale Instead
+                  </button>
+                )}
               </div>
-              {editingItem && (
-                <button onClick={resetSaleForm} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline shrink-0">
-                  <Plus className="w-4 h-4" /> New Sale Instead
-                </button>
-              )}
-            </div>
 
-            <form onSubmit={handleSaveItem} className="space-y-4 text-sm">
-              <div className="grid grid-cols-2 gap-3 mb-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <input name="customer" defaultValue={formData.customer || ''} placeholder="Customer Name (optional)" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                 <input name="customerPhone" defaultValue={formData.customerPhone || ''} placeholder="Customer Phone" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
               </div>
-              <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
-
-              <div className="relative mb-4">
-                <Calendar className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  name="date"
-                  type="date"
-                  defaultValue={formData.date || new Date().toISOString().split('T')[0]}
-                  onChange={handleInputChange}
-                  max={new Date().toISOString().split('T')[0]}
-                  className="w-full pl-9 pr-3 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                />
-                <p className="text-[11px] text-[var(--text-muted)] mt-1">Defaults to today — change this if you're catching up on a sale from an earlier day.</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                <div className="relative">
+                  <Calendar className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    name="date"
+                    type="date"
+                    defaultValue={formData.date || new Date().toISOString().split('T')[0]}
+                    onChange={handleInputChange}
+                    max={new Date().toISOString().split('T')[0]}
+                    className="w-full pl-9 pr-3 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                  />
+                </div>
               </div>
+              <p className="text-[11px] text-[var(--text-muted)] -mt-2">Date defaults to today — change it if you're catching up on a sale from an earlier day.</p>
 
-              <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1 mb-4">
+              <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1">
                 <button
                   type="button"
                   onClick={() => handleToggleSaleType('Retail')}
@@ -3729,11 +3753,12 @@ export default function App() {
               <div className="space-y-3">
                 <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
                 {cartItems.map((item, idx) => {
-                  const searchTerm = (item.productSearch || '').toLowerCase();
+                  const searchTerm = (item.productSearch || '').toLowerCase().trim();
                   const rowProducts = products
                     .filter(p => !item.categoryFilter || p.category === item.categoryFilter)
-                    .filter(p => !searchTerm || p.name.toLowerCase().includes(searchTerm));
+                    .filter(p => !searchTerm || p.name.toLowerCase().includes(searchTerm) || (p.productCode || '').toLowerCase().includes(searchTerm));
                   const lineDiscount = Math.max(0, (parseFloat(item.customProductPrice) || 0) - (parseFloat(item.customSellPrice) || 0));
+                  const selectedProduct = products.find(p => p.id === parseInt(item.productId, 10));
                   return (
                   <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
                     <div className="relative">
@@ -3742,7 +3767,20 @@ export default function App() {
                         type="text"
                         value={item.productSearch || ''}
                         onChange={(e) => handleCartChange(idx, 'productSearch', e.target.value)}
-                        placeholder="Search products to add..."
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter') return;
+                          e.preventDefault();
+                          const typed = (item.productSearch || '').trim();
+                          if (!typed) return;
+                          // An exact product-code match wins outright — built for fast, scanner-style entry.
+                          const exactCodeMatch = products.find(p => p.productCode && p.productCode.toLowerCase() === typed.toLowerCase());
+                          const candidate = exactCodeMatch || (rowProducts.length === 1 ? rowProducts[0] : null);
+                          if (!candidate) return;
+                          handleCartChange(idx, 'productId', String(candidate.id));
+                          handleCartChange(idx, 'productSearch', '');
+                          if (idx === cartItems.length - 1) addCartRow();
+                        }}
+                        placeholder="Search by name or item code, or scan a code + Enter..."
                         className="w-full pl-9 pr-3 py-2.5 text-base border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400"
                       />
                     </div>
@@ -3763,7 +3801,7 @@ export default function App() {
                         className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
                       >
                         <option value="">{rowProducts.length === 0 ? 'No matching products' : 'Select Product...'}</option>
-                        {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                        {rowProducts.map(p => <option key={p.id} value={p.id}>{p.productCode ? `[${p.productCode}] ` : ''}{p.name} (Stock: {p.stock})</option>)}
                       </select>
                       <input 
                         required 
@@ -3780,6 +3818,9 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                    {selectedProduct?.productCode && (
+                      <p className="text-[11px] text-[var(--text-muted)] pl-1">Item Code: <span className="font-mono font-semibold">{selectedProduct.productCode}</span></p>
+                    )}
                     {!formData.isCombo && (
                     <div className="flex gap-2 items-center pl-1">
                       <div className="flex-1">
@@ -3859,7 +3900,14 @@ export default function App() {
                   className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
                 />
               )}
-              <div className="flex gap-4 pt-2">
+            </div>
+
+            {/* Right-hand summary panel — sticky on large screens so it stays visible
+               while scrolling through a long list of products in the order. */}
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 md:p-6 shadow-sm transition-colors space-y-4 text-sm lg:sticky lg:top-6">
+              <h4 className="font-bold text-[var(--text-primary)] text-base">Order Summary</h4>
+
+              <div className="flex gap-3">
                 <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Extra Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                 <select name="status" defaultValue={formData.status || 'Paid'} onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
                   <option value="Paid">Paid in Full</option>
@@ -3877,25 +3925,38 @@ export default function App() {
 
               {/* Live running total, so the amount is clear before you hit save */}
               {(() => {
+                const liveItemCount = cartItems.reduce((sum, item) => sum + (parseInt(item.qty, 10) || 0), 0);
                 const liveSubtotal = formData.isCombo
                   ? (parseFloat(formData.comboPrice) || 0)
                   : cartItems.reduce((sum, item) => sum + (parseFloat(item.customSellPrice) || 0) * (parseInt(item.qty, 10) || 0), 0);
                 const liveDiscount = parseFloat(formData.discount) || 0;
                 const liveTotal = Math.max(0, liveSubtotal - liveDiscount);
                 return (
-                  <div className="bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-4 flex justify-between items-center">
-                    <span className="font-bold text-[var(--text-secondary)]">Order Total</span>
-                    <span className="text-xl font-black text-[var(--text-primary)]">Tk {liveTotal.toLocaleString()}</span>
+                  <div className="bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-4 space-y-1.5">
+                    <div className="flex justify-between text-xs text-[var(--text-muted)]">
+                      <span>{liveItemCount} unit{liveItemCount !== 1 ? 's' : ''}</span>
+                      <span>{(formData.saleType || 'Retail')}</span>
+                    </div>
+                    {liveDiscount > 0 && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-[var(--text-muted)]">Subtotal</span>
+                        <span className="text-[var(--text-secondary)]">Tk {liveSubtotal.toLocaleString()}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between items-center pt-1.5 border-t border-[var(--border-card)]">
+                      <span className="font-bold text-[var(--text-secondary)]">Order Total</span>
+                      <span className="text-2xl font-black text-[var(--text-primary)]">Tk {liveTotal.toLocaleString()}</span>
+                    </div>
                   </div>
                 );
               })()}
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
-                <button type="button" onClick={resetSaleForm} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Clear</button>
-                <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">{editingItem ? 'Save Changes' : 'Complete Sale'}</button>
+              <div className="flex flex-col gap-2 pt-2">
+                <button type="submit" className="w-full px-6 py-3.5 bg-orange-500 text-white rounded-xl font-bold text-base hover:bg-orange-600 shadow-md transition-all">{editingItem ? 'Save Changes' : 'Complete Sale'}</button>
+                <button type="button" onClick={resetSaleForm} className="w-full px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Clear</button>
               </div>
-            </form>
-          </div>
+            </div>
+          </form>
         )}
 
         {/* PURCHASES TAB — what you've bought from suppliers, and what you still owe them */}
@@ -4198,6 +4259,35 @@ export default function App() {
               </div>
             </div>
 
+            {/* RETAIL VS WHOLESALE — same revenue/profit split as above, broken out by sale type */}
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
+              <h3 className="text-lg font-extrabold text-[var(--text-primary)] mb-5">Retail vs. Wholesale</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-orange-500/10 rounded-xl p-5">
+                  <p className="text-xs font-bold text-orange-700 uppercase tracking-wide mb-3">Retail — {retailSales.length} order{retailSales.length !== 1 ? 's' : ''}</p>
+                  <div className="flex justify-between mb-1.5">
+                    <span className="text-sm text-[var(--text-secondary)]">Revenue</span>
+                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {retailRevenue.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-[var(--text-secondary)]">Profit</span>
+                    <span className={`text-sm font-bold ${retailProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {retailProfit.toLocaleString()}</span>
+                  </div>
+                </div>
+                <div className="bg-indigo-500/10 rounded-xl p-5">
+                  <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide mb-3">Wholesale — {wholesaleSales.length} order{wholesaleSales.length !== 1 ? 's' : ''}</p>
+                  <div className="flex justify-between mb-1.5">
+                    <span className="text-sm text-[var(--text-secondary)]">Revenue</span>
+                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {wholesaleRevenue.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-[var(--text-secondary)]">Profit</span>
+                    <span className={`text-sm font-bold ${wholesaleProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {wholesaleProfit.toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* DAILY REPORT — sales, purchases, and profit for a specific day, plus a 14-day trend */}
             <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
@@ -4419,29 +4509,70 @@ export default function App() {
 
         {/* TRANSACTIONS TAB — every money movement, with profit shown for sale-linked income */}
         {activeTab === 'Transactions' && (
-          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
-            {filteredTransactions.length === 0 ? (
-              <EmptyState
-                icon={transactions.length === 0 ? ArrowLeftRight : PackageSearch}
-                title={transactions.length === 0 ? 'No transactions yet' : 'No matching transactions'}
-                message={transactions.length === 0 ? "Transactions from sales are logged automatically — you can also click 'Add New Transaction' for anything else." : 'Try a different search term.'}
-              />
-            ) : (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-orange-500/10 rounded-2xl p-5">
+                <p className="text-xs font-bold text-orange-700 uppercase tracking-wide mb-1">Retail Revenue</p>
+                <p className="text-xl font-black text-orange-700">Tk {retailRevenue.toLocaleString()}</p>
+              </div>
+              <div className="bg-indigo-500/10 rounded-2xl p-5">
+                <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide mb-1">Wholesale Revenue</p>
+                <p className="text-xl font-black text-indigo-700">Tk {wholesaleRevenue.toLocaleString()}</p>
+              </div>
+              <div className="bg-red-500/10 rounded-2xl p-5">
+                <p className="text-xs font-bold text-red-700 uppercase tracking-wide mb-1">Expenses</p>
+                <p className="text-xl font-black text-red-700">Tk {totalExpensesAllTime.toLocaleString()}</p>
+              </div>
+              <div className="bg-emerald-500/10 rounded-2xl p-5">
+                <p className="text-xs font-bold text-emerald-700 uppercase tracking-wide mb-1">Money Added</p>
+                <p className="text-xl font-black text-emerald-700">Tk {capitalTotal.toLocaleString()}</p>
+              </div>
+            </div>
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1 text-xs font-bold">
+                  {['All', 'Retail', 'Wholesale'].map(opt => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setTransactionTypeFilter(opt)}
+                      className={`px-4 py-2 rounded-lg transition-colors ${transactionTypeFilter === opt ? 'bg-orange-500 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {filteredTransactions.length === 0 ? (
+                <EmptyState
+                  icon={transactions.length === 0 ? ArrowLeftRight : PackageSearch}
+                  title={transactions.length === 0 ? 'No transactions yet' : 'No matching transactions'}
+                  message={transactions.length === 0 ? "Transactions from sales are logged automatically — you can also click 'Add New Transaction' for anything else." : 'Try a different search term or filter.'}
+                />
+              ) : (
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                    <th className="pb-3">DATE</th><th className="pb-3">ID</th><th className="pb-3">TYPE</th><th className="pb-3">REF</th><th className="pb-3">AMOUNT</th><th className="pb-3">PROFIT</th><th className="pb-3">STATUS</th><th className="pb-3 text-right">ACTION</th>
+                    <th className="pb-3">DATE</th><th className="pb-3">ID</th><th className="pb-3">CUSTOMER</th><th className="pb-3">REF</th><th className="pb-3">AMOUNT</th><th className="pb-3">PROFIT</th><th className="pb-3">STATUS</th><th className="pb-3 text-right">ACTION</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border-card)]">
                   {filteredTransactions.map(t => {
                     const profit = transactionProfit(t);
+                    const linkedSaleForType = t.type === 'Income' ? salesById[t.refId] : null;
                     return (
                       <tr key={t.id} className="hover:bg-[var(--bg-hover)] transition-colors">
                         <td className="py-4 text-[var(--text-muted)]">{t.date}</td>
                         <td className="py-4 font-bold text-orange-600">{t.id}</td>
                         <td className="py-4">
-                          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${t.type === 'Income' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'}`}>{t.type}</span>
+                          {linkedSaleForType ? (
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${linkedSaleForType.saleType === 'Wholesale' ? 'bg-indigo-100 text-indigo-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                              {linkedSaleForType.customer || 'Walk-in Customer'}
+                            </span>
+                          ) : (
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${t.type === 'Capital' ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-700'}`}>{t.type}</span>
+                          )}
                         </td>
                         <td className="py-4 text-[var(--text-secondary)]">
                           {t.refId || '—'}
@@ -4493,6 +4624,7 @@ export default function App() {
                 </tbody>
               </table>
             )}
+            </div>
           </div>
         )}
 
@@ -4559,74 +4691,79 @@ export default function App() {
         {/* EXPENSES TAB — operating costs (food, delivery, rent, etc) tracked separately from COGS */}
         {activeTab === 'Expenses' && (
           <div className="space-y-6">
-            <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-2xl p-6 shadow-lg text-white flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold text-emerald-100 mb-1 uppercase tracking-wide">Business Balance</p>
-                <p className="text-3xl font-black">Tk {(shopSettings.cashBalance || 0).toLocaleString()}</p>
-                <p className="text-xs text-emerald-100 mt-1">Money you have on hand right now — expenses deduct from this automatically.</p>
+            <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-2xl p-6 shadow-lg text-white">
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
+                <div>
+                  <p className="text-xs font-semibold text-emerald-100 mb-1 uppercase tracking-wide">Business Balance</p>
+                  <p className="text-3xl font-black">Tk {(shopSettings.cashBalance || 0).toLocaleString()}</p>
+                  <p className="text-xs text-emerald-100 mt-1">Money you have on hand right now — expenses deduct from this automatically.</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => { setCloseTillForm({ countedAmount: '', note: '' }); setShowCloseTillModal(true); }}
+                    className="bg-emerald-800/40 border border-white/30 text-white font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-800/60 transition-colors"
+                  >
+                    <Calculator className="w-5 h-5" /> Close Till
+                  </button>
+                  <button
+                    onClick={() => { setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] }); setShowAddMoneyModal(true); }}
+                    className="bg-white text-emerald-700 font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-50 transition-colors"
+                  >
+                    <Banknote className="w-5 h-5" /> Add Money
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => { setCloseTillForm({ countedAmount: '', note: '' }); setShowCloseTillModal(true); }}
-                  className="bg-emerald-800/40 border border-white/30 text-white font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-800/60 transition-colors"
-                >
-                  <Calculator className="w-5 h-5" /> Close Till
-                </button>
-                <button
-                  onClick={() => { setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] }); setShowAddMoneyModal(true); }}
-                  className="bg-white text-emerald-700 font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-50 transition-colors"
-                >
-                  <Banknote className="w-5 h-5" /> Add Money
-                </button>
+              <div className="grid grid-cols-3 gap-3 pt-4 border-t border-white/20">
+                <div>
+                  <p className="text-[11px] font-semibold text-emerald-100 uppercase tracking-wide">Today</p>
+                  <p className="text-lg font-black">Tk {totalExpensesToday.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold text-emerald-100 uppercase tracking-wide">This Month</p>
+                  <p className="text-lg font-black">Tk {totalExpensesThisMonth.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold text-emerald-100 uppercase tracking-wide">All Time</p>
+                  <p className="text-lg font-black">Tk {totalExpensesAllTime.toLocaleString()}</p>
+                </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
-                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">Today</p>
-                <p className="text-xl font-black text-[var(--text-primary)]">Tk {totalExpensesToday.toLocaleString()}</p>
-              </div>
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
-                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">This Month</p>
-                <p className="text-xl font-black text-[var(--text-primary)]">Tk {totalExpensesThisMonth.toLocaleString()}</p>
-              </div>
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
-                <p className="text-xs font-semibold text-[var(--text-muted)] mb-1">All Time</p>
-                <p className="text-xl font-black text-red-500">Tk {totalExpensesAllTime.toLocaleString()}</p>
-              </div>
-            </div>
-
-            {Object.keys(expensesByCategory).length > 0 && (
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
-                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">By Category (All Time)</p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {Object.entries(expensesByCategory).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
-                    <div key={cat} className="bg-[var(--bg-hover)] rounded-xl p-3">
-                      <p className="text-[11px] font-semibold text-[var(--text-muted)] truncate">{cat}</p>
-                      <p className="text-sm font-bold text-[var(--text-primary)]">Tk {amt.toLocaleString()}</p>
+            {(Object.keys(expensesByCategory).length > 0 || capitalTransactions.length > 0) && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {Object.keys(expensesByCategory).length > 0 && (
+                  <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                    <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">By Category (All Time)</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(expensesByCategory).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
+                        <div key={cat} className="bg-[var(--bg-hover)] rounded-xl p-3">
+                          <p className="text-[11px] font-semibold text-[var(--text-muted)] truncate">{cat}</p>
+                          <p className="text-sm font-bold text-[var(--text-primary)]">Tk {amt.toLocaleString()}</p>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
+                  </div>
+                )}
 
-            {capitalTransactions.length > 0 && (
-              <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
-                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">Money Added to Balance</p>
-                <div className="divide-y divide-[var(--border-card)]">
-                  {capitalTransactions.map(t => (
-                    <div key={t.id} className="flex items-center justify-between py-2.5 text-sm">
-                      <div>
-                        <p className="font-medium text-[var(--text-primary)]">{t.note || 'Money added'}</p>
-                        <p className="text-[var(--text-muted)] text-xs">{t.date}</p>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className="font-bold text-emerald-600">+ Tk {t.amount.toLocaleString()}</span>
-                        <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-1"><Trash2 className="w-4 h-4" /></button>
-                      </div>
+                {capitalTransactions.length > 0 && (
+                  <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 shadow-sm transition-colors">
+                    <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide mb-3">Money Added to Balance</p>
+                    <div className="divide-y divide-[var(--border-card)] max-h-56 overflow-y-auto">
+                      {capitalTransactions.map(t => (
+                        <div key={t.id} className="flex items-center justify-between py-2.5 text-sm">
+                          <div className="min-w-0">
+                            <p className="font-medium text-[var(--text-primary)] truncate">{t.note || 'Money added'}</p>
+                            <p className="text-[var(--text-muted)] text-xs">{t.date}</p>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="font-bold text-emerald-600">+ Tk {t.amount.toLocaleString()}</span>
+                            <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Entry" className="text-[var(--text-muted)] hover:text-red-600 p-1"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             )}
 
