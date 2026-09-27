@@ -6,7 +6,7 @@ import {
   Plus, Trash2, TrendingUp, TrendingDown, AlertTriangle, Eye, X, Printer, Pencil, Save, RefreshCw,
   Search, Moon, Sun, PackageSearch, Award, Clock, Sparkles, Inbox, LogOut, Loader2, Mail, Lock,
   Wallet, PackagePlus, Tag, BadgePercent, PackageOpen, Calendar, Download, Receipt, History, Boxes, ArrowRightLeft,
-  Banknote, CreditCard, Undo2, Calculator, MessageCircle, AlertOctagon
+  Banknote, CreditCard, Undo2, Calculator, MessageCircle, AlertOctagon, Megaphone
 } from 'lucide-react';
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts';
 
@@ -77,6 +77,13 @@ const buildWhatsAppReminderLink = (phone, message) => {
   return `https://wa.me/${withCountryCode}?text=${encodeURIComponent(message)}`;
 };
 
+// Next available product code — starts at 10001, then one past whatever the highest
+// existing numeric code is, so new products never collide with one you've edited by hand.
+const nextProductCode = (products) => {
+  const numericCodes = products.map(p => parseInt(p.productCode, 10)).filter(n => !isNaN(n));
+  return numericCodes.length > 0 ? Math.max(...numericCodes) + 1 : 10001;
+};
+
 const defaultSettings = {
   shopName: 'Satota Electronics',
   proprietor: 'Fahim Khan',
@@ -122,8 +129,8 @@ const dbMap = {
     fromDb: (r) => ({ id: r.id, name: r.name, description: r.description, totalItems: r.total_items }),
   },
   product: {
-    toDb: (p) => ({ name: p.name, category: p.category, buy_price: p.buyPrice, sell_price: p.sellPrice, stock: p.stock, reorder_level: p.active === false ? 0 : p.reorderLevel, active: p.active !== false, last_sold_at: p.lastSoldAt || null }),
-    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, buyPrice: Number(r.buy_price), sellPrice: Number(r.sell_price), stock: r.stock, reorderLevel: r.reorder_level, active: r.active !== false, lastSoldAt: r.last_sold_at }),
+    toDb: (p) => ({ name: p.name, category: p.category, buy_price: p.buyPrice, sell_price: p.sellPrice, wholesale_price: p.wholesalePrice ?? null, product_code: p.productCode ?? null, stock: p.stock, reorder_level: p.active === false ? 0 : p.reorderLevel, active: p.active !== false, last_sold_at: p.lastSoldAt || null }),
+    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, buyPrice: Number(r.buy_price), sellPrice: Number(r.sell_price), wholesalePrice: r.wholesale_price !== null && r.wholesale_price !== undefined ? Number(r.wholesale_price) : null, productCode: r.product_code || null, stock: r.stock, reorderLevel: r.reorder_level, active: r.active !== false, lastSoldAt: r.last_sold_at }),
   },
   customer: {
     toDb: (c) => ({ name: c.name, email: c.email, phone: c.phone, address: c.address }),
@@ -139,6 +146,7 @@ const dbMap = {
       items: s.items, subtotal: s.subtotal, discount: s.discount, total_sell_amount: s.totalSellAmount,
       total_cost_amount: s.totalCostAmount, status: s.status, sale_date: s.date,
       paid_amount: s.paidAmount !== undefined && s.paidAmount !== null ? s.paidAmount : s.totalSellAmount,
+      sale_type: s.saleType || 'Retail',
     }),
     fromDb: (r) => ({
       id: r.id, customer: r.customer, customerPhone: r.customer_phone, customerAddress: r.customer_address,
@@ -146,6 +154,7 @@ const dbMap = {
       totalSellAmount: Number(r.total_sell_amount), totalCostAmount: Number(r.total_cost_amount),
       status: r.status, date: r.sale_date,
       paidAmount: r.paid_amount !== null && r.paid_amount !== undefined ? Number(r.paid_amount) : Number(r.total_sell_amount),
+      saleType: r.sale_type || 'Retail',
     }),
   },
   purchase: {
@@ -516,6 +525,15 @@ export default function App() {
   const [showCloseTillModal, setShowCloseTillModal] = useState(false);
   const [closeTillForm, setCloseTillForm] = useState({ countedAmount: '', note: '' });
 
+  // Promotions page — build a WhatsApp promo message for a newly-arrived product and
+  // click through your customer list to send it. WhatsApp has no bulk-send API for a
+  // personal account, so this is a "generate links, click each one" workflow.
+  const [promoProductId, setPromoProductId] = useState('');
+  const [promoMessage, setPromoMessage] = useState('');
+  const [promoSelectedCustomerIds, setPromoSelectedCustomerIds] = useState([]);
+  const [promoSentIds, setPromoSentIds] = useState([]);
+  const [promoCustomerSearch, setPromoCustomerSearch] = useState('');
+
   const handleOpenPreviousDue = (customer) => {
     setPreviousDueForm({
       customer: customer ? customer.name : '',
@@ -780,6 +798,22 @@ export default function App() {
     }
   };
 
+  // Auto-fills a starting promo message when a product is picked; the shop owner can
+  // still edit it freely before sending. {name} is replaced per-customer at send time.
+  const handleSelectPromoProduct = (productId) => {
+    setPromoProductId(productId);
+    const prod = products.find(p => p.id === parseInt(productId, 10));
+    if (prod) {
+      setPromoMessage(
+        `Hi {name}! 🎉 New arrival at ${shopSettings.shopName}: *${prod.name}* is now in stock for Tk ${prod.sellPrice.toLocaleString()}. Visit us or reply to this message to order — while stock lasts!`
+      );
+    }
+  };
+
+  const togglePromoCustomer = (id) => {
+    setPromoSelectedCustomerIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
@@ -824,10 +858,19 @@ export default function App() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
-    setFormData({});
+    setFormData(activeTab === 'Products' ? { productCode: String(nextProductCode(products)) } : {});
     setCartItems([{ productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
     setPurchaseItems([{ productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }]);
     setShowModal(true);
+  };
+
+  // Sales is now a full-screen, always-visible entry form rather than a modal, so it
+  // needs its own explicit reset — otherwise a half-finished or just-edited sale would
+  // still be sitting in the form the next time someone lands on this tab.
+  const resetSaleForm = () => {
+    setEditingItem(null);
+    setFormData({});
+    setCartItems([{ productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
   };
 
   const handleOpenEdit = (item) => {
@@ -864,8 +907,9 @@ export default function App() {
     if (field === 'productId') {
       const selectedProd = products.find(p => p.id === parseInt(value, 10));
       if (selectedProd) {
-        updatedCart[index].customSellPrice = selectedProd.sellPrice;
-        updatedCart[index].customProductPrice = selectedProd.sellPrice;
+        const price = formData.saleType === 'Wholesale' ? (selectedProd.wholesalePrice ?? selectedProd.sellPrice) : selectedProd.sellPrice;
+        updatedCart[index].customSellPrice = price;
+        updatedCart[index].customProductPrice = price;
       }
     }
     if (field === 'categoryFilter') {
@@ -879,6 +923,18 @@ export default function App() {
 
   const addCartRow = () => {
     setCartItems([...cartItems, { productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
+  };
+
+  // Switching between Retail and Wholesale re-prices every row already in the cart from
+  // the product's retail vs. wholesale price, so the whole order stays consistent.
+  const handleToggleSaleType = (newType) => {
+    setFormData({ ...formData, saleType: newType });
+    setCartItems(cartItems.map(item => {
+      const prod = products.find(p => p.id === parseInt(item.productId, 10));
+      if (!prod) return item;
+      const newPrice = newType === 'Wholesale' ? (prod.wholesalePrice ?? prod.sellPrice) : prod.sellPrice;
+      return { ...item, customSellPrice: newPrice, customProductPrice: newPrice };
+    }));
   };
 
   const removeCartRow = (index) => {
@@ -954,11 +1010,18 @@ export default function App() {
         const newStock = parseInt(formData.stock, 10) || 0;
         const active = formData.active !== false;
         const reorderLevel = active ? (parseInt(formData.reorderLevel, 10) || 5) : 0;
+        const trimmedCode = (formData.productCode || '').toString().trim();
+        if (trimmedCode) {
+          const codeTaken = products.some(p => p.productCode === trimmedCode && (!editingItem || p.id !== editingItem.id));
+          if (codeTaken) return alert(`Product code "${trimmedCode}" is already used by another product — pick a different one.`);
+        }
         const productData = {
           name: formData.name,
           category: formData.category,
+          productCode: trimmedCode || null,
           buyPrice: parseFloat(formData.buyPrice) || 0,
           sellPrice: parseFloat(formData.sellPrice) || 0,
+          wholesalePrice: formData.wholesalePrice !== '' && formData.wholesalePrice !== undefined && formData.wholesalePrice !== null ? parseFloat(formData.wholesalePrice) : null,
           stock: newStock,
           reorderLevel, active,
           lastSoldAt: formData.lastSoldAt || null,
@@ -1065,7 +1128,8 @@ export default function App() {
           totalCostAmount: totalCostAmount,
           status: saleStatus,
           paidAmount: paidAmount,
-          date: formData.date || new Date().toISOString().split('T')[0]
+          date: formData.date || new Date().toISOString().split('T')[0],
+          saleType: formData.saleType || 'Retail',
         };
 
         // Auto-add this customer to the Customers list if they gave us details and
@@ -1918,6 +1982,23 @@ export default function App() {
   const totalProductCount = products.length;
   const totalStockUnits = products.reduce((sum, p) => sum + (p.stock || 0), 0);
   const [showLowStock, setShowLowStock] = useState(false);
+  const productsWithoutCode = products.filter(p => !p.productCode);
+
+  const handleAssignAllProductCodes = async () => {
+    if (productsWithoutCode.length === 0) return;
+    if (!window.confirm(`Assign sequential codes (starting from ${nextProductCode(products)}) to the ${productsWithoutCode.length} product(s) that don't have one yet?`)) return;
+    try {
+      let nextCode = nextProductCode(products);
+      const updates = productsWithoutCode.map(p => ({ id: p.id, productCode: String(nextCode++) }));
+      await Promise.all(updates.map(u => supabase.from('products').update({ product_code: u.productCode }).eq('id', u.id)));
+      setProducts(prev => prev.map(p => {
+        const u = updates.find(x => x.id === p.id);
+        return u ? { ...p, productCode: u.productCode } : p;
+      }));
+    } catch (err) {
+      alert('Could not assign codes — ' + (err.message || 'please check your internet connection and try again.'));
+    }
+  };
 
   // Backup reminder — nudge if it's been a while (or never) since the last export.
   const daysSinceBackup = shopSettings.lastBackupAt
@@ -2052,7 +2133,7 @@ export default function App() {
 
   // --- Search filtering, applied per active tab ---
   const filteredProducts = products.filter(p =>
-    (!currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch)) &&
+    (!currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch) || (p.productCode || '').toLowerCase().includes(currentSearch)) &&
     (!productCategoryFilter || p.category === productCategoryFilter)
   );
   const purchaseItemsSummary = (p) => (p.items || []).map(i => i.productName).join(', ');
@@ -2135,6 +2216,7 @@ export default function App() {
     { name: 'Warehouse', icon: Boxes },
     { name: 'Damaged', icon: AlertTriangle },
     { name: 'Customers', icon: Users },
+    { name: 'Promotions', icon: Megaphone },
     { name: 'Suppliers', icon: Truck }, { name: 'Transactions', icon: ArrowLeftRight },
     { name: 'Expenses', icon: Receipt },
     { name: 'Due Amounts', icon: Wallet },
@@ -2199,12 +2281,15 @@ export default function App() {
         }
         .tab-enter { animation: fadeSlideIn 0.25s ease-out; }
 
-        /* Sales receipts print small, on a thermal-receipt roll. Supplier invoices print
-           big, full-page — so the two use separate named @page sizes. */
+        /* Sales receipts print small, on a 2in x 4in thermal label/receipt.
+           Supplier invoices print big, full-page — so the two use separate named @page sizes. */
         @page { size: A4; margin: 12mm; }
-        @page pos-receipt { size: 2.5in auto; margin: 2mm; }
+        @page pos-receipt { size: 2in 4in; margin: 1mm; }
 
         @media print {
+          html, body {
+            width: 2in;
+          }
           body * {
             visibility: hidden;
           }
@@ -2217,12 +2302,17 @@ export default function App() {
             position: absolute;
             left: 0;
             top: 0;
-            width: 2.5in !important;
+            width: 2in !important;
+            max-width: 2in !important;
             background: white !important;
             padding: 0 !important;
             margin: 0 !important;
             box-shadow: none !important;
             border: none !important;
+            border-radius: 0 !important;
+          }
+          #printable-invoice-modal * {
+            box-sizing: border-box;
           }
           #printable-purchase-modal {
             position: absolute;
@@ -2276,7 +2366,7 @@ export default function App() {
             return (
               <button
                 key={item.name}
-                onClick={() => { setActiveTab(item.name); setShowModal(false); setMobileSidebarOpen(false); }}
+                onClick={() => { setActiveTab(item.name); setShowModal(false); setMobileSidebarOpen(false); if (item.name === 'Sales') resetSaleForm(); }}
                 className={`relative w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
                   isActive ? 'bg-orange-500 text-white font-bold shadow-md shadow-orange-900/30' : 'text-slate-400 hover:bg-white/5 hover:text-white'
                 }`}
@@ -2338,7 +2428,7 @@ export default function App() {
                 </select>
               </div>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses', 'Warehouse'].includes(activeTab) && (
+            {['Products', 'Categories', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses', 'Warehouse'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -2357,12 +2447,12 @@ export default function App() {
                 <Wallet className="w-5 h-5" /> Add Previous Due
               </button>
             )}
-            {['Products', 'Categories', 'Sales', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses', 'Warehouse'].includes(activeTab) && (
+            {['Products', 'Categories', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses', 'Warehouse'].includes(activeTab) && (
               <button 
                 onClick={handleOpenAdd}
                 className="bg-orange-500 text-white text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-600 shadow-md transition-all hover:shadow-lg hover:-translate-y-0.5"
               >
-                <Plus className="w-5 h-5" /> Add New {activeTab === 'Sales' ? 'Sale' : activeTab === 'Damaged' ? 'Damage Entry' : activeTab === 'Warehouse' ? 'Warehouse Stock' : activeTab.slice(0, -1)}
+                <Plus className="w-5 h-5" /> Add New {activeTab === 'Damaged' ? 'Damage Entry' : activeTab === 'Warehouse' ? 'Warehouse Stock' : activeTab.slice(0, -1)}
               </button>
             )}
           </div>
@@ -2426,7 +2516,7 @@ export default function App() {
         )}
 
         {/* Dynamic Add / Edit Modal */}
-        {showModal && (
+        {showModal && activeTab !== 'Sales' && (
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
             <div className={`bg-[var(--bg-card)] rounded-2xl p-5 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] max-h-[90vh] overflow-y-auto ${activeTab === 'Sales' ? 'md:w-[700px]' : 'md:w-[480px]'}`}>
               <div className="flex justify-between items-center mb-5">
@@ -2438,6 +2528,10 @@ export default function App() {
                 {activeTab === 'Products' && (
                   <>
                     <input required name="name" defaultValue={formData.name || ''} placeholder="Product Name" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <div>
+                      <input name="productCode" defaultValue={formData.productCode || ''} placeholder="Product Code" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <p className="text-[11px] text-[var(--text-muted)] mt-1">Your own reference number for this product — auto-suggested, but you can change it to anything.</p>
+                    </div>
                     <select required name="category" defaultValue={formData.category || ''} onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
                       <option value="">Select Category...</option>
                       {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
@@ -2468,6 +2562,10 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                    <div>
+                      <input name="wholesalePrice" type="number" step="0.01" defaultValue={formData.wholesalePrice ?? ''} placeholder="Wholesale Price (Tk) — optional" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <p className="text-[11px] text-[var(--text-muted)] mt-1">Used automatically when a sale is switched to Wholesale mode. Leave blank to fall back to the retail sell price.</p>
+                    </div>
                     <div className="flex gap-4">
                       <input required name="stock" type="number" defaultValue={formData.stock !== undefined ? formData.stock : ''} placeholder="Current Stock" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                       <input required name="reorderLevel" type="number" disabled={formData.active === false} defaultValue={formData.reorderLevel !== undefined ? formData.reorderLevel : ''} placeholder="Reorder Level" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 disabled:opacity-50" />
@@ -2481,156 +2579,6 @@ export default function App() {
                       />
                       Active — included in low-stock alerts and reorder suggestions
                     </label>
-                  </>
-                )}
-
-                {activeTab === 'Sales' && (
-                  <>
-                    <div className="grid grid-cols-2 gap-3 mb-2">
-                      <input name="customer" defaultValue={formData.customer || ''} placeholder="Customer Name (optional)" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <input name="customerPhone" defaultValue={formData.customerPhone || ''} placeholder="Customer Phone" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                    </div>
-                    <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
-
-                    <div className="relative mb-4">
-                      <Calendar className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        name="date"
-                        type="date"
-                        defaultValue={formData.date || new Date().toISOString().split('T')[0]}
-                        onChange={handleInputChange}
-                        max={new Date().toISOString().split('T')[0]}
-                        className="w-full pl-9 pr-3 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                      />
-                      <p className="text-[11px] text-[var(--text-muted)] mt-1">Defaults to today — change this if you're catching up on a sale from an earlier day.</p>
-                    </div>
-
-                    <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
-                      <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
-                      {cartItems.map((item, idx) => {
-                        const searchTerm = (item.productSearch || '').toLowerCase();
-                        const rowProducts = products
-                          .filter(p => !item.categoryFilter || p.category === item.categoryFilter)
-                          .filter(p => !searchTerm || p.name.toLowerCase().includes(searchTerm));
-                        const lineDiscount = Math.max(0, (parseFloat(item.customProductPrice) || 0) - (parseFloat(item.customSellPrice) || 0));
-                        return (
-                        <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
-                          <div className="relative">
-                            <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                            <input
-                              type="text"
-                              value={item.productSearch || ''}
-                              onChange={(e) => handleCartChange(idx, 'productSearch', e.target.value)}
-                              placeholder="Search products to add..."
-                              className="w-full pl-9 pr-3 py-2.5 text-base border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400"
-                            />
-                          </div>
-                          <div className="flex gap-2 items-center">
-                            <select
-                              value={item.categoryFilter}
-                              onChange={(e) => handleCartChange(idx, 'categoryFilter', e.target.value)}
-                              title="Filter by category"
-                              className="w-32 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
-                            >
-                              <option value="">All Categories</option>
-                              {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                            </select>
-                            <select 
-                              required 
-                              value={item.productId}
-                              onChange={(e) => handleCartChange(idx, 'productId', e.target.value)} 
-                              className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
-                            >
-                              <option value="">{rowProducts.length === 0 ? 'No matching products' : 'Select Product...'}</option>
-                              {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
-                            </select>
-                            <input 
-                              required 
-                              type="number" 
-                              placeholder="Qty" 
-                              value={item.qty} 
-                              min="1"
-                              onChange={(e) => handleCartChange(idx, 'qty', e.target.value)} 
-                              className="w-16 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400" 
-                            />
-                            {cartItems.length > 1 && (
-                              <button type="button" onClick={() => removeCartRow(idx)} className="text-red-500 hover:text-red-700 p-1">
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
-                          </div>
-                          {!formData.isCombo && (
-                          <div className="flex gap-2 items-center pl-1">
-                            <div className="flex-1">
-                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Product Price</label>
-                              <input 
-                                required 
-                                type="number" 
-                                step="0.01"
-                                placeholder="Product Price" 
-                                value={item.customProductPrice} 
-                                onChange={(e) => handleCartChange(idx, 'customProductPrice', e.target.value)} 
-                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
-                              />
-                            </div>
-                            <div className="flex-1">
-                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Sell Price</label>
-                              <input 
-                                required 
-                                type="number" 
-                                step="0.01"
-                                placeholder="Sell Price" 
-                                value={item.customSellPrice} 
-                                onChange={(e) => handleCartChange(idx, 'customSellPrice', e.target.value)} 
-                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
-                              />
-                            </div>
-                            {lineDiscount > 0 && (
-                              <span className="shrink-0 self-end mb-1.5 inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold px-2 py-1 rounded-lg">
-                                <BadgePercent className="w-3 h-3" /> Tk {lineDiscount.toLocaleString()} off
-                              </span>
-                            )}
-                          </div>
-                          )}
-                        </div>
-                        );
-                      })}
-                    </div>
-                    <button type="button" onClick={addCartRow} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline pt-1">
-                      <Plus className="w-4 h-4" /> Add Another Item
-                    </button>
-
-                    <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-3 mt-2">
-                      <input
-                        type="checkbox"
-                        checked={!!formData.isCombo}
-                        onChange={(e) => setFormData({ ...formData, isCombo: e.target.checked })}
-                        className="w-4 h-4 accent-orange-500"
-                      />
-                      Combo Sale — charge one total price for all items together
-                    </label>
-                    {formData.isCombo && (
-                      <input
-                        required name="comboPrice" type="number" step="0.01" defaultValue={formData.comboPrice || ''}
-                        placeholder="Combo Total Price (Tk)" onChange={handleInputChange}
-                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
-                      />
-                    )}
-                    <div className="flex gap-4 pt-2">
-                      <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Extra Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <select name="status" defaultValue={formData.status || 'Paid'} onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
-                        <option value="Paid">Paid in Full</option>
-                        <option value="Partial">Partially Paid (Half Due)</option>
-                        <option value="Due">Fully Due / Pending</option>
-                      </select>
-                    </div>
-                    {formData.status === 'Partial' && (
-                      <input
-                        name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''}
-                        placeholder="Amount Paid Now (Tk)" onChange={handleInputChange}
-                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                      />
-                    )}
                   </>
                 )}
 
@@ -3287,49 +3235,49 @@ export default function App() {
           </div>
         )}
 
-        {/* PRINTABLE INVOICE MODAL — sized for a 2.5in thermal receipt printer */}
+        {/* PRINTABLE INVOICE MODAL — sized for a 2in x 4in thermal receipt printer */}
         {selectedReceipt && (
           <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center z-50 backdrop-blur-sm p-4 overflow-y-auto">
-            <div className="bg-white text-slate-800 rounded-xl w-[300px] shadow-2xl border border-slate-200 overflow-hidden relative font-mono" id="printable-invoice-modal">
+            <div className="bg-white text-slate-800 rounded-xl w-[220px] shadow-2xl border border-slate-200 overflow-hidden relative font-mono" id="printable-invoice-modal">
 
-              <div className="p-4 text-center border-b border-dashed border-slate-300">
-                <div className="w-9 h-9 mx-auto mb-1.5 bg-orange-500 text-white rounded-lg flex items-center justify-center font-black text-base">
+              <div className="p-3 text-center border-b border-dashed border-slate-300">
+                <div className="w-8 h-8 mx-auto mb-1.5 bg-orange-500 text-white rounded-lg flex items-center justify-center font-black text-sm">
                   {(shopSettings.shopName || 'S').charAt(0)}
                 </div>
-                <p className="font-extrabold text-sm uppercase tracking-wide leading-tight">{shopSettings.shopName}</p>
-                <p className="text-[10px] text-slate-500 mt-1 leading-snug">{shopSettings.address}</p>
-                <p className="text-[10px] text-slate-500">{shopSettings.phone}</p>
+                <p className="font-extrabold text-xs uppercase tracking-wide leading-tight">{shopSettings.shopName}</p>
+                <p className="text-[9px] text-slate-500 mt-1 leading-snug">{shopSettings.address}</p>
+                <p className="text-[9px] text-slate-500">{shopSettings.phone}</p>
               </div>
 
-              <div className="px-4 py-3 text-[10px] space-y-0.5 border-b border-dashed border-slate-300">
+              <div className="px-3 py-2.5 text-[9px] space-y-0.5 border-b border-dashed border-slate-300">
                 <div className="flex justify-between"><span>Invoice:</span><span className="font-bold">{selectedReceipt.id}</span></div>
                 <div className="flex justify-between"><span>Date:</span><span>{selectedReceipt.date}</span></div>
                 <div className="flex justify-between"><span>Status:</span><span className="font-bold">{selectedReceipt.status}</span></div>
-                <div className="flex justify-between"><span>Customer:</span><span className="font-bold text-right">{selectedReceipt.customer}</span></div>
+                <div className="flex justify-between gap-1"><span>Customer:</span><span className="font-bold text-right">{selectedReceipt.customer}</span></div>
                 {selectedReceipt.customerPhone && <div className="flex justify-between"><span>Phone:</span><span>{selectedReceipt.customerPhone}</span></div>}
               </div>
 
-              <div className="px-4 py-3 border-b border-dashed border-slate-300">
-                <div className="flex justify-between text-[10px] font-bold uppercase text-slate-500 mb-1.5">
+              <div className="px-3 py-2.5 border-b border-dashed border-slate-300">
+                <div className="flex justify-between text-[9px] font-bold uppercase text-slate-500 mb-1.5">
                   <span>Item</span><span>Total</span>
                 </div>
                 <div className="space-y-1.5">
                   {selectedReceipt.items.map((item, idx) => (
-                    <div key={idx} className="text-[11px]">
-                      <div className="flex justify-between font-semibold">
-                        <span className="pr-2">{item.productName}</span>
+                    <div key={idx} className="text-[10px]">
+                      <div className="flex justify-between font-semibold gap-1">
+                        <span className="pr-1 break-words">{item.productName}</span>
                         <span className="whitespace-nowrap">Tk {item.lineTotal.toLocaleString()}</span>
                       </div>
-                      <div className="text-[10px] text-slate-500">{item.qty} x Tk {item.sellPrice.toLocaleString()}</div>
+                      <div className="text-[9px] text-slate-500">{item.qty} x Tk {item.sellPrice.toLocaleString()}</div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              <div className="px-4 py-3 text-[11px] space-y-1 border-b border-dashed border-slate-300">
+              <div className="px-3 py-2.5 text-[10px] space-y-1 border-b border-dashed border-slate-300">
                 <div className="flex justify-between"><span>Subtotal</span><span>Tk {(selectedReceipt.subtotal || selectedReceipt.totalSellAmount).toLocaleString()}</span></div>
                 <div className="flex justify-between"><span>Discount</span><span>Tk {(selectedReceipt.discount || 0).toLocaleString()}</span></div>
-                <div className="flex justify-between text-sm font-black pt-1.5 mt-1 border-t border-slate-300">
+                <div className="flex justify-between text-xs font-black pt-1.5 mt-1 border-t border-slate-300">
                   <span>TOTAL</span><span>Tk {selectedReceipt.totalSellAmount.toLocaleString()}</span>
                 </div>
                 {(() => {
@@ -3346,18 +3294,18 @@ export default function App() {
               </div>
 
               {(shopSettings.receiptPolicies && shopSettings.receiptPolicies.filter(Boolean).length > 0) && (
-                <div className="px-4 py-3 text-[9px] text-slate-500 leading-relaxed border-b border-dashed border-slate-300 space-y-0.5">
+                <div className="px-3 py-2.5 text-[8px] text-slate-500 leading-relaxed border-b border-dashed border-slate-300 space-y-0.5">
                   {shopSettings.receiptPolicies.filter(Boolean).map((line, idx) => (
                     <p key={idx}>{line}</p>
                   ))}
                 </div>
               )}
 
-              <div className="px-4 py-4 text-center text-[10px] text-slate-400">
+              <div className="px-3 py-3 text-center text-[9px] text-slate-400">
                 — {shopSettings.proprietor} —
               </div>
 
-              <div className="bg-slate-50 p-4 flex justify-between items-center no-print">
+              <div className="bg-slate-50 p-3 flex justify-between items-center no-print">
                 <button onClick={handlePrint} className="bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-md transition-all font-sans">
                   <Printer className="w-3.5 h-3.5" /> Print Receipt
                 </button>
@@ -3584,6 +3532,12 @@ export default function App() {
               </div>
               <p className="text-[11px] text-[var(--text-muted)] italic">Buy price &amp; profit are blurred — hover to reveal</p>
             </div>
+            {productsWithoutCode.length > 0 && (
+              <div className="mb-4 bg-blue-50 border border-blue-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-blue-800 text-xs font-semibold">{productsWithoutCode.length} product{productsWithoutCode.length !== 1 ? 's' : ''} don't have a product code yet.</p>
+                <button onClick={handleAssignAllProductCodes} className="bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded-lg hover:bg-blue-700 transition-colors">Assign Codes (from {nextProductCode(products)})</button>
+              </div>
+            )}
             {filteredProducts.length === 0 ? (
               <EmptyState
                 icon={products.length === 0 ? Box : PackageSearch}
@@ -3594,6 +3548,7 @@ export default function App() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                  <th className="pb-3">CODE</th>
                   <th className="pb-3">PRODUCT</th>
                   <th className="pb-3">CATEGORY</th>
                   <th className="pb-3">BUY PRICE</th>
@@ -3607,7 +3562,7 @@ export default function App() {
               {Object.keys(productsByCategory).sort().map(catName => (
                 <tbody key={catName} className="divide-y divide-[var(--border-card)]">
                   <tr>
-                    <td colSpan={8} className="pt-5 pb-2">
+                    <td colSpan={9} className="pt-5 pb-2">
                       <span className="inline-flex items-center gap-1.5 text-orange-600 font-black text-xs uppercase tracking-wide">
                         <Tag className="w-3.5 h-3.5" /> {catName} <span className="text-[var(--text-muted)] font-semibold normal-case">({productsByCategory[catName].length})</span>
                       </span>
@@ -3615,6 +3570,7 @@ export default function App() {
                   </tr>
                   {productsByCategory[catName].map(p => (
                     <tr key={p.id} className={`hover:bg-[var(--bg-hover)] transition-colors ${p.active === false ? 'opacity-50' : ''}`}>
+                      <td className="py-4 text-[var(--text-muted)] font-mono text-xs">{p.productCode || '—'}</td>
                       <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
                       <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
                       <td className="py-4 text-[var(--text-secondary)]">
@@ -3716,67 +3672,234 @@ export default function App() {
           </div>
         )}
 
-        {/* SALES TAB */}
+        {/* SALES TAB — full-screen entry form. History, receipts, returns and payment status
+           now live on the Transactions page; this tab is purely for entering a new sale
+           (or editing one, when arrived at via "Edit Sale" from Transactions/Due Amounts). */}
         {activeTab === 'Sales' && (
-          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
-            {filteredSales.length === 0 ? (
-              <EmptyState
-                icon={sales.length === 0 ? ShoppingCart : PackageSearch}
-                title={sales.length === 0 ? 'No sales yet' : 'No matching sales'}
-                message={sales.length === 0 ? "Click 'Add New Sale' to record your first order." : 'Try a different search term.'}
-              />
-            ) : (
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
-                  <th className="pb-3">ORDER ID</th><th className="pb-3">CUSTOMER</th><th className="pb-3">ITEMS</th><th className="pb-3">TOTAL AMOUNT</th><th className="pb-3">PAYMENT</th><th className="pb-3">DATE</th><th className="pb-3 text-right">ACTION</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[var(--border-card)]">
-                {filteredSales.map(s => {
-                  const paid = s.paidAmount ?? (s.status === 'Paid' ? s.totalSellAmount : 0);
-                  const due = Math.max(0, s.totalSellAmount - paid);
+          <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-5 md:p-8 shadow-sm transition-colors max-w-3xl mx-auto">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-xl font-bold text-[var(--text-primary)]">{editingItem ? `Edit Sale ${editingItem.id}` : 'New Sale'}</h3>
+                <p className="text-xs text-[var(--text-muted)] mt-0.5">Full sale history, receipts and returns are on the Transactions page.</p>
+              </div>
+              {editingItem && (
+                <button onClick={resetSaleForm} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline shrink-0">
+                  <Plus className="w-4 h-4" /> New Sale Instead
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveItem} className="space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-3 mb-2">
+                <input name="customer" defaultValue={formData.customer || ''} placeholder="Customer Name (optional)" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                <input name="customerPhone" defaultValue={formData.customerPhone || ''} placeholder="Customer Phone" onChange={handleInputChange} className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+              </div>
+              <input name="customerAddress" defaultValue={formData.customerAddress || ''} placeholder="Customer Address" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-orange-400" />
+
+              <div className="relative mb-4">
+                <Calendar className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  name="date"
+                  type="date"
+                  defaultValue={formData.date || new Date().toISOString().split('T')[0]}
+                  onChange={handleInputChange}
+                  max={new Date().toISOString().split('T')[0]}
+                  className="w-full pl-9 pr-3 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">Defaults to today — change this if you're catching up on a sale from an earlier day.</p>
+              </div>
+
+              <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1 mb-4">
+                <button
+                  type="button"
+                  onClick={() => handleToggleSaleType('Retail')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold transition-colors ${(formData.saleType || 'Retail') === 'Retail' ? 'bg-orange-500 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                >
+                  Retail Sale
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleToggleSaleType('Wholesale')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold transition-colors ${formData.saleType === 'Wholesale' ? 'bg-indigo-600 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                >
+                  Wholesale Order
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <label className="font-bold text-[var(--text-secondary)]">Products in Order:</label>
+                {cartItems.map((item, idx) => {
+                  const searchTerm = (item.productSearch || '').toLowerCase();
+                  const rowProducts = products
+                    .filter(p => !item.categoryFilter || p.category === item.categoryFilter)
+                    .filter(p => !searchTerm || p.name.toLowerCase().includes(searchTerm));
+                  const lineDiscount = Math.max(0, (parseFloat(item.customProductPrice) || 0) - (parseFloat(item.customSellPrice) || 0));
                   return (
-                  <tr key={s.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                    <td className="py-4 font-bold text-orange-600">{s.id}</td>
-                    <td className="py-4 font-medium text-[var(--text-primary)]">{s.customer}</td>
-                    <td className="py-4 text-[var(--text-secondary)]">
-                      {s.items.length} item(s)
-                      {s.items.some(i => (i.returnedQty || 0) > 0) && (
-                        <span className="block text-[11px] text-blue-600 font-semibold">{s.items.reduce((sum, i) => sum + (i.returnedQty || 0), 0)} returned</span>
+                  <div key={idx} className="bg-[var(--bg-hover)] p-3 rounded-xl border border-[var(--border-card)] space-y-2">
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={item.productSearch || ''}
+                        onChange={(e) => handleCartChange(idx, 'productSearch', e.target.value)}
+                        placeholder="Search products to add..."
+                        className="w-full pl-9 pr-3 py-2.5 text-base border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <select
+                        value={item.categoryFilter}
+                        onChange={(e) => handleCartChange(idx, 'categoryFilter', e.target.value)}
+                        title="Filter by category"
+                        className="w-32 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      >
+                        <option value="">All Categories</option>
+                        {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                      </select>
+                      <select 
+                        required 
+                        value={item.productId}
+                        onChange={(e) => handleCartChange(idx, 'productId', e.target.value)} 
+                        className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      >
+                        <option value="">{rowProducts.length === 0 ? 'No matching products' : 'Select Product...'}</option>
+                        {rowProducts.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                      </select>
+                      <input 
+                        required 
+                        type="number" 
+                        placeholder="Qty" 
+                        value={item.qty} 
+                        min="1"
+                        onChange={(e) => handleCartChange(idx, 'qty', e.target.value)} 
+                        className="w-16 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                      />
+                      {cartItems.length > 1 && (
+                        <button type="button" onClick={() => removeCartRow(idx)} className="text-red-500 hover:text-red-700 p-1">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       )}
-                    </td>
-                    <td className="py-4 font-bold text-[var(--text-primary)]">Tk {s.totalSellAmount.toLocaleString()}</td>
-                    <td className="py-4">
-                      {s.totalSellAmount <= 0 && s.items.some(i => (i.returnedQty || 0) > 0) ? (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Returned</span>
-                      ) : due <= 0 ? (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Paid</span>
-                      ) : (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700" title={`Paid Tk ${paid.toLocaleString()}`}>
-                          Due Tk {due.toLocaleString()}
+                    </div>
+                    {!formData.isCombo && (
+                    <div className="flex gap-2 items-center pl-1">
+                      <div className="flex-1">
+                        <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Product Price</label>
+                        <input 
+                          required 
+                          type="number" 
+                          step="0.01"
+                          placeholder="Product Price" 
+                          value={item.customProductPrice} 
+                          onChange={(e) => handleCartChange(idx, 'customProductPrice', e.target.value)} 
+                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">{item.priceEntryMode === 'total' ? `Total (x${item.qty || 1})` : 'Sell Price'}</label>
+                          {parseInt(item.qty, 10) > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleCartChange(idx, 'priceEntryMode', item.priceEntryMode === 'total' ? 'unit' : 'total')}
+                              className="text-[9px] font-bold text-orange-500 hover:text-orange-600 underline"
+                            >
+                              {item.priceEntryMode === 'total' ? 'switch to per-unit' : 'enter total instead'}
+                            </button>
+                          )}
+                        </div>
+                        <input 
+                          required 
+                          type="number" 
+                          step="0.01"
+                          placeholder={item.priceEntryMode === 'total' ? 'Total Price' : 'Sell Price'}
+                          value={item.priceEntryMode === 'total' ? Math.round(((parseFloat(item.customSellPrice) || 0) * (parseInt(item.qty, 10) || 1)) * 100) / 100 : item.customSellPrice}
+                          onChange={(e) => {
+                            if (item.priceEntryMode === 'total') {
+                              const qty = parseInt(item.qty, 10) || 1;
+                              const perUnit = (parseFloat(e.target.value) || 0) / qty;
+                              handleCartChange(idx, 'customSellPrice', perUnit);
+                            } else {
+                              handleCartChange(idx, 'customSellPrice', e.target.value);
+                            }
+                          }}
+                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400" 
+                        />
+                        {item.priceEntryMode === 'total' && (
+                          <p className="text-[9px] text-[var(--text-muted)] mt-0.5">= Tk {(parseFloat(item.customSellPrice) || 0).toLocaleString()} / unit on the invoice</p>
+                        )}
+                      </div>
+                      {lineDiscount > 0 && (
+                        <span className="shrink-0 self-end mb-1.5 inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold px-2 py-1 rounded-lg">
+                          <BadgePercent className="w-3 h-3" /> Tk {lineDiscount.toLocaleString()} off
                         </span>
                       )}
-                    </td>
-                    <td className="py-4 text-[var(--text-muted)]">{s.date}</td>
-                    <td className="py-4 text-right flex justify-end gap-1">
-                      <button onClick={() => setSelectedReceipt(s)} title="View & Print Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
-                      {!s.id.startsWith('#DUE-') && s.items.some(i => (i.returnedQty || 0) < i.qty) && (
-                        <button onClick={() => openReturnModal(s)} title="Process Return" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Undo2 className="w-4 h-4" /></button>
-                      )}
-                      <button onClick={() => handleOpenEdit(s)} title="Edit Sale Record" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
-                      <button onClick={() => handleDelete(s.id, 'Sales')} title="Delete Sale" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
-                    </td>
-                  </tr>
+                    </div>
+                    )}
+                  </div>
                   );
                 })}
-              </tbody>
-            </table>
-            )}
+              </div>
+              <button type="button" onClick={addCartRow} className="text-orange-600 font-bold text-xs flex items-center gap-1 hover:underline pt-1">
+                <Plus className="w-4 h-4" /> Add Another Item
+              </button>
+
+              <label className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-3 mt-2">
+                <input
+                  type="checkbox"
+                  checked={!!formData.isCombo}
+                  onChange={(e) => setFormData({ ...formData, isCombo: e.target.checked })}
+                  className="w-4 h-4 accent-orange-500"
+                />
+                Combo Sale — charge one total price for all items together
+              </label>
+              {formData.isCombo && (
+                <input
+                  required name="comboPrice" type="number" step="0.01" defaultValue={formData.comboPrice || ''}
+                  placeholder="Combo Total Price (Tk)" onChange={handleInputChange}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                />
+              )}
+              <div className="flex gap-4 pt-2">
+                <input name="discount" type="number" defaultValue={formData.discount || ''} placeholder="Extra Discount (Tk)" onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                <select name="status" defaultValue={formData.status || 'Paid'} onChange={handleInputChange} className="w-1/2 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                  <option value="Paid">Paid in Full</option>
+                  <option value="Partial">Partially Paid (Half Due)</option>
+                  <option value="Due">Fully Due / Pending</option>
+                </select>
+              </div>
+              {formData.status === 'Partial' && (
+                <input
+                  name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''}
+                  placeholder="Amount Paid Now (Tk)" onChange={handleInputChange}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+              )}
+
+              {/* Live running total, so the amount is clear before you hit save */}
+              {(() => {
+                const liveSubtotal = formData.isCombo
+                  ? (parseFloat(formData.comboPrice) || 0)
+                  : cartItems.reduce((sum, item) => sum + (parseFloat(item.customSellPrice) || 0) * (parseInt(item.qty, 10) || 0), 0);
+                const liveDiscount = parseFloat(formData.discount) || 0;
+                const liveTotal = Math.max(0, liveSubtotal - liveDiscount);
+                return (
+                  <div className="bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-4 flex justify-between items-center">
+                    <span className="font-bold text-[var(--text-secondary)]">Order Total</span>
+                    <span className="text-xl font-black text-[var(--text-primary)]">Tk {liveTotal.toLocaleString()}</span>
+                  </div>
+                );
+              })()}
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                <button type="button" onClick={resetSaleForm} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Clear</button>
+                <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">{editingItem ? 'Save Changes' : 'Complete Sale'}</button>
+              </div>
+            </form>
           </div>
         )}
 
         {/* PURCHASES TAB — what you've bought from suppliers, and what you still owe them */}
+
         {activeTab === 'Purchases' && (
           <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm overflow-x-auto transition-colors">
             {filteredPurchases.length === 0 ? (
@@ -4320,7 +4443,20 @@ export default function App() {
                         <td className="py-4">
                           <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${t.type === 'Income' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'}`}>{t.type}</span>
                         </td>
-                        <td className="py-4 text-[var(--text-secondary)]">{t.refId || '—'}</td>
+                        <td className="py-4 text-[var(--text-secondary)]">
+                          {t.refId || '—'}
+                          {(() => {
+                            const linkedSale = t.type === 'Income' ? salesById[t.refId] : null;
+                            if (!linkedSale) return null;
+                            const returnedQty = linkedSale.items.reduce((sum, i) => sum + (i.returnedQty || 0), 0);
+                            return (
+                              <span className="block text-[11px] text-[var(--text-muted)]">
+                                {linkedSale.items.length} item(s){linkedSale.saleType === 'Wholesale' && <span className="text-indigo-600 font-semibold"> · Wholesale</span>}
+                                {returnedQty > 0 && <span className="text-blue-600 font-semibold"> · {returnedQty} returned</span>}
+                              </span>
+                            );
+                          })()}
+                        </td>
                         <td className="py-4 font-bold text-[var(--text-primary)]">Tk {t.amount.toLocaleString()}</td>
                         <td className="py-4 font-bold">
                           {profit === null ? <span className="text-[var(--text-muted)]">—</span> : (
@@ -4329,8 +4465,27 @@ export default function App() {
                         </td>
                         <td className="py-4 text-[var(--text-secondary)]">{t.status}</td>
                         <td className="py-4 text-right flex justify-end gap-1">
-                          <button onClick={() => handleOpenEdit(t)} title="Edit Transaction" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
-                          <button onClick={() => handleDelete(t.id, 'Transactions')} title="Delete Transaction" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                          {(() => {
+                            const linkedSale = t.type === 'Income' ? salesById[t.refId] : null;
+                            if (linkedSale) {
+                              return (
+                                <>
+                                  <button onClick={() => setSelectedReceipt(linkedSale)} title="View & Print Invoice" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Eye className="w-4 h-4" /></button>
+                                  {!linkedSale.id.startsWith('#DUE-') && linkedSale.items.some(i => (i.returnedQty || 0) < i.qty) && (
+                                    <button onClick={() => openReturnModal(linkedSale)} title="Process Return" className="text-[var(--text-muted)] hover:text-blue-600 p-2"><Undo2 className="w-4 h-4" /></button>
+                                  )}
+                                  <button onClick={() => { setActiveTab('Sales'); handleOpenEdit(linkedSale); }} title="Edit Sale" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                                  <button onClick={() => handleDelete(linkedSale.id, 'Sales')} title="Delete Sale" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                                </>
+                              );
+                            }
+                            return (
+                              <>
+                                <button onClick={() => handleOpenEdit(t)} title="Edit Transaction" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
+                                <button onClick={() => handleDelete(t.id, 'Transactions')} title="Delete Transaction" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
+                              </>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -4546,6 +4701,102 @@ export default function App() {
               </tbody>
             </table>
             )}
+          </div>
+        )}
+
+        {/* PROMOTIONS TAB — build a WhatsApp promo message for a newly-arrived product,
+           pick which customers to tell, and click through to send it. WhatsApp has no
+           bulk-send API for a personal number, so this is a guided "one click per
+           customer" workflow rather than a true one-click blast. */}
+        {activeTab === 'Promotions' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors space-y-4">
+              <h3 className="font-bold text-[var(--text-primary)] flex items-center gap-2"><Megaphone className="w-5 h-5 text-orange-500" /> Promote a Product</h3>
+              <div>
+                <label className="block text-xs font-bold text-[var(--text-muted)] uppercase mb-1.5">Which product just arrived?</label>
+                <select
+                  value={promoProductId}
+                  onChange={(e) => handleSelectPromoProduct(e.target.value)}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                >
+                  <option value="">Select Product...</option>
+                  {products.filter(p => p.active !== false).map(p => <option key={p.id} value={p.id}>{p.name} — Tk {p.sellPrice.toLocaleString()}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-[var(--text-muted)] uppercase mb-1.5">Message</label>
+                <textarea
+                  value={promoMessage}
+                  onChange={(e) => setPromoMessage(e.target.value)}
+                  rows={5}
+                  placeholder="Pick a product above to generate a starting message, or write your own here."
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none"
+                />
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">Use <code className="bg-[var(--bg-hover)] px-1 rounded">{'{name}'}</code> anywhere — it's swapped for each customer's name when you click Send.</p>
+              </div>
+            </div>
+
+            <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors flex flex-col">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-[var(--text-primary)]">Send To</h3>
+                <div className="flex gap-3 text-xs font-bold">
+                  <button type="button" onClick={() => setPromoSelectedCustomerIds(customers.filter(c => c.phone).map(c => c.id))} className="text-orange-600 hover:underline">Select All</button>
+                  <button type="button" onClick={() => setPromoSelectedCustomerIds([])} className="text-[var(--text-muted)] hover:underline">Clear</button>
+                </div>
+              </div>
+              <div className="relative mb-3">
+                <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  value={promoCustomerSearch}
+                  onChange={(e) => setPromoCustomerSearch(e.target.value)}
+                  placeholder="Search customers..."
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+              </div>
+
+              {customers.filter(c => c.phone).length === 0 ? (
+                <EmptyState icon={Users} title="No customer phone numbers yet" message="Add a phone number to your customers to be able to message them here." />
+              ) : (
+              <div className="flex-1 overflow-y-auto max-h-96 divide-y divide-[var(--border-card)] -mx-1">
+                {customers
+                  .filter(c => c.phone)
+                  .filter(c => !promoCustomerSearch || c.name.toLowerCase().includes(promoCustomerSearch.toLowerCase()))
+                  .map(c => {
+                    const isSelected = promoSelectedCustomerIds.includes(c.id);
+                    const isSent = promoSentIds.includes(c.id);
+                    const link = promoMessage ? buildWhatsAppReminderLink(c.phone, promoMessage.replace(/{name}/g, c.name)) : null;
+                    return (
+                      <div key={c.id} className={`flex items-center justify-between gap-3 px-1 py-2.5 ${isSelected ? 'bg-[var(--bg-hover)]' : ''}`}>
+                        <label className="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1">
+                          <input type="checkbox" checked={isSelected} onChange={() => togglePromoCustomer(c.id)} className="w-4 h-4 accent-orange-500 shrink-0" />
+                          <div className="min-w-0">
+                            <p className="font-semibold text-[var(--text-primary)] truncate">{c.name}</p>
+                            <p className="text-xs text-[var(--text-muted)]">{c.phone}</p>
+                          </div>
+                        </label>
+                        {isSelected && link && (
+                          <a
+                            href={link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => setPromoSentIds(prev => prev.includes(c.id) ? prev : [...prev, c.id])}
+                            className={`shrink-0 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors ${isSent ? 'bg-emerald-100 text-emerald-700' : 'bg-emerald-500 text-white hover:bg-emerald-600'}`}
+                          >
+                            <MessageCircle className="w-3.5 h-3.5" /> {isSent ? 'Sent' : 'Send'}
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+              )}
+
+              {promoSelectedCustomerIds.length > 0 && (
+                <p className="text-xs text-[var(--text-muted)] mt-3 pt-3 border-t border-[var(--border-card)]">
+                  {promoSentIds.filter(id => promoSelectedCustomerIds.includes(id)).length} of {promoSelectedCustomerIds.length} selected sent this session · click each "Send" to open WhatsApp with the message ready
+                </p>
+              )}
+            </div>
           </div>
         )}
       </main>
