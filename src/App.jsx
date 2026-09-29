@@ -431,7 +431,7 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to load data from Supabase:', err);
-      alert('Could not load your shop data. Please check your internet connection and refresh.');
+      showToast('Could not load your shop data. Please check your internet connection and refresh.', 'error');
     } finally {
       setDataLoading(false);
     }
@@ -443,10 +443,11 @@ export default function App() {
     }
   }, [session]);
 
-  const handleLogout = async () => {
-    if (!window.confirm('Sign out of your shop account?')) return;
-    await supabase.auth.signOut();
-    setCategories([]); setProducts([]); setCustomers([]); setSuppliers([]); setSales([]); setTransactions([]);
+  const handleLogout = () => {
+    askConfirm('Sign out of your shop account?', async () => {
+      await supabase.auth.signOut();
+      setCategories([]); setProducts([]); setCustomers([]); setSuppliers([]); setSales([]); setTransactions([]);
+    }, { confirmLabel: 'Sign Out' });
   };
 
   // Theme (Dark Mode)
@@ -467,8 +468,29 @@ export default function App() {
   // Styled "Mark as Received" modal state — replaces the old window.prompt() flow
   const [receiveModal, setReceiveModal] = useState(null); // { purchase, itemIndex, item, pendingQty }
   const [receiveQtyInput, setReceiveQtyInput] = useState('');
+  // Styled "Move to Shop" modal for warehouse stock — replaces the old window.prompt()
+  const [transferModal, setTransferModal] = useState(null); // the warehouse item being moved
+  const [transferQtyInput, setTransferQtyInput] = useState('');
   // Styled delete-confirmation modal state — replaces the old window.confirm() flow
   const [deleteConfirm, setDeleteConfirm] = useState(null); // { id, type }
+
+  // In-app toast notifications — replaces every window.alert() so messages show inside
+  // the software's own UI instead of a browser popup that says "yourapp.vercel.app says".
+  const [toasts, setToasts] = useState([]);
+  const showToast = (message, type = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
+  };
+  const dismissToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
+
+  // Generic in-app confirmation modal — replaces every window.confirm(). Call
+  // askConfirm(message, onYes) instead of `if (!window.confirm(msg)) return; ...`;
+  // the code that used to run after the confirm now runs inside onYes.
+  const [confirmModal, setConfirmModal] = useState(null); // { message, onYes, confirmLabel, danger }
+  const askConfirm = (message, onYes, opts = {}) => {
+    setConfirmModal({ message, onYes, confirmLabel: opts.confirmLabel || 'Continue', danger: !!opts.danger });
+  };
 
   // Settings Form State — kept in sync with shopSettings once it loads from Supabase
   const [settingsForm, setSettingsForm] = useState(shopSettings);
@@ -546,8 +568,8 @@ export default function App() {
   const handleSavePreviousDue = async (e) => {
     e.preventDefault();
     const amount = parseFloat(previousDueForm.amount) || 0;
-    if (!previousDueForm.customer.trim()) return alert('Please enter a customer name.');
-    if (amount <= 0) return alert('Please enter a due amount greater than 0.');
+    if (!previousDueForm.customer.trim()) return showToast('Please enter a customer name.');
+    if (amount <= 0) return showToast('Please enter a due amount greater than 0.');
 
     try {
       const orderId = await nextSequentialId(sales.map(s => s.id), 'DUE', '#DUE-');
@@ -583,9 +605,9 @@ export default function App() {
       }
 
       setShowPreviousDueModal(false);
-      alert('Previous due recorded — it now shows on the Due Amounts page for this customer.');
+      showToast('Previous due recorded — it now shows on the Due Amounts page for this customer.', 'success');
     } catch (err) {
-      alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not save — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -599,7 +621,7 @@ export default function App() {
     if (!paymentModal) return;
     const { kind, record } = paymentModal;
     const paymentNow = parseFloat(paymentAmountInput) || 0;
-    if (paymentNow <= 0) return alert('Enter a payment amount greater than 0.');
+    if (paymentNow <= 0) return showToast('Enter a payment amount greater than 0.');
 
     try {
       if (kind === 'customer') {
@@ -638,14 +660,14 @@ export default function App() {
       setPaymentModal(null);
       setPaymentAmountInput('');
     } catch (err) {
-      alert('Could not record payment — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not record payment — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
   const handleSaveAddMoney = async (e) => {
     e.preventDefault();
     const amount = parseFloat(addMoneyForm.amount) || 0;
-    if (amount <= 0) return alert('Enter an amount greater than 0.');
+    if (amount <= 0) return showToast('Enter an amount greater than 0.');
 
     try {
       const newEntry = {
@@ -665,13 +687,13 @@ export default function App() {
       if (!ok) {
         // Balance update failed but the log entry is already saved — let them know
         // the money-in was recorded even though the running total didn't move.
-        alert('Money-in was logged, but the balance total could not be updated. Please refresh.');
+        showToast('Money-in was logged, but the balance total could not be updated. Please refresh.');
       }
 
       setShowAddMoneyModal(false);
       setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] });
     } catch (err) {
-      alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not save — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -688,7 +710,7 @@ export default function App() {
     const entries = Object.entries(returnQtyInputs)
       .map(([idx, val]) => ({ idx: parseInt(idx, 10), qty: parseInt(val, 10) || 0 }))
       .filter(e => e.qty > 0);
-    if (entries.length === 0) return alert('Enter a quantity to return for at least one item.');
+    if (entries.length === 0) return showToast('Enter a quantity to return for at least one item.');
 
     // Build the updated items array, clamping each return to what's actually left to return.
     let returnValue = 0;
@@ -707,7 +729,7 @@ export default function App() {
       return { ...item, returnedQty: alreadyReturned + returningNow };
     });
 
-    if (returnValue <= 0) return alert('Enter a quantity to return for at least one item.');
+    if (returnValue <= 0) return showToast('Enter a quantity to return for at least one item.');
 
     const newSubtotal = Math.max(0, sale.subtotal - returnValue);
     const newDiscount = Math.min(sale.discount || 0, newSubtotal);
@@ -756,14 +778,14 @@ export default function App() {
       setReturnModal(null);
       setReturnQtyInputs({});
     } catch (err) {
-      alert('Could not process the return — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not process the return — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
   const handleCloseTill = async (e) => {
     e.preventDefault();
     const counted = parseFloat(closeTillForm.countedAmount);
-    if (isNaN(counted) || counted < 0) return alert('Enter the amount actually counted in the till.');
+    if (isNaN(counted) || counted < 0) return showToast('Enter the amount actually counted in the till.');
 
     const expected = shopSettings.cashBalance || 0;
     const difference = counted - expected; // positive = overage, negative = shortage
@@ -789,12 +811,12 @@ export default function App() {
       setShowCloseTillModal(false);
       setCloseTillForm({ countedAmount: '', note: '' });
       if (difference === 0) {
-        alert('Till matches exactly — nice.');
+        showToast('Till matches exactly — nice.', 'success');
       } else {
-        alert(`Till closed. ${difference > 0 ? 'Overage' : 'Shortage'} of Tk ${Math.abs(difference).toLocaleString()} logged and balance updated.`);
+        showToast(`Till closed. ${difference > 0 ? 'Overage' : 'Shortage'} of Tk ${Math.abs(difference).toLocaleString()} logged and balance updated.`, 'success');
       }
     } catch (err) {
-      alert('Could not close the till — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not close the till — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -831,9 +853,9 @@ export default function App() {
       });
       if (error) throw error;
       setShopSettings(settingsForm);
-      alert('Settings updated successfully!');
+      showToast('Settings updated successfully!', 'success');
     } catch (err) {
-      alert('Could not save settings: ' + (err.message || 'unknown error'));
+      showToast('Could not save settings: ' + (err.message || 'unknown error'), 'error');
     }
   };
 
@@ -851,7 +873,7 @@ export default function App() {
     } catch (err) {
       // Roll back the optimistic update so the on-screen balance never drifts from the database.
       setShopSettings(prev => ({ ...prev, cashBalance: previousBalance }));
-      alert('Could not update balance — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not update balance — ' + (err.message || 'please check your internet connection and try again.'), 'error');
       return false;
     }
   };
@@ -1013,7 +1035,7 @@ export default function App() {
         const trimmedCode = (formData.productCode || '').toString().trim();
         if (trimmedCode) {
           const codeTaken = products.some(p => p.productCode === trimmedCode && (!editingItem || p.id !== editingItem.id));
-          if (codeTaken) return alert(`Product code "${trimmedCode}" is already used by another product — pick a different one.`);
+          if (codeTaken) return showToast(`Product code "${trimmedCode}" is already used by another product — pick a different one.`);
         }
         const productData = {
           name: formData.name,
@@ -1055,7 +1077,7 @@ export default function App() {
 
         const isCombo = !!formData.isCombo;
         const comboPrice = parseFloat(formData.comboPrice) || 0;
-        if (isCombo && comboPrice <= 0) return alert('Please enter the combo total price.');
+        if (isCombo && comboPrice <= 0) return showToast('Please enter the combo total price.');
 
         // First pass: validate stock and, for combo sales, work out each item's
         // share of the one combo price (weighted by its normal catalog price).
@@ -1063,9 +1085,9 @@ export default function App() {
         let totalCatalogWeight = 0;
         for (let item of cartItems) {
           const prod = workingProducts.find(p => p.id === parseInt(item.productId, 10));
-          if (!prod) return alert("Please select a valid product for all rows.");
+          if (!prod) return showToast("Please select a valid product for all rows.");
           const qty = parseInt(item.qty, 10) || 1;
-          if (qty > prod.stock) return alert(`Not enough stock for ${prod.name}. Available: ${prod.stock}`);
+          if (qty > prod.stock) return showToast(`Not enough stock for ${prod.name}. Available: ${prod.stock}`);
           const weight = prod.sellPrice * qty;
           totalCatalogWeight += weight;
           rawItems.push({ item, prod, qty, weight });
@@ -1248,13 +1270,13 @@ export default function App() {
         }
       } else if (activeTab === 'Damaged') {
         const prod = products.find(p => p.id === parseInt(formData.productId, 10));
-        if (!prod) return alert('Please select a valid product.');
+        if (!prod) return showToast('Please select a valid product.');
         const qty = parseInt(formData.qty, 10) || 1;
         const entryType = formData.type || 'Inventory Damage';
         const isInventoryDamage = entryType === 'Inventory Damage';
 
         if (entryType === 'After-Sales Service' && (!formData.customerName || !formData.customerPhone)) {
-          return alert('Please enter the customer name and phone number.');
+          return showToast('Please enter the customer name and phone number.');
         }
 
         // When editing, restore any previously-deducted qty first so the stock check is accurate
@@ -1264,7 +1286,7 @@ export default function App() {
         const availableStock = prod.stock + previouslyDeducted;
 
         if (isInventoryDamage && qty > availableStock) {
-          return alert(`Not enough stock for ${prod.name}. Available: ${availableStock}`);
+          return showToast(`Not enough stock for ${prod.name}. Available: ${availableStock}`);
         }
 
         const damagedRecord = {
@@ -1296,7 +1318,7 @@ export default function App() {
         }
 
       } else if (activeTab === 'Purchases') {
-        if (!formData.supplier) return alert('Please select a supplier.');
+        if (!formData.supplier) return showToast('Please select a supplier.');
 
         // Build the line items: each row can be a catalog product or a free-text
         // description, with its own ordered qty vs receivedQty (partial delivery support).
@@ -1305,8 +1327,8 @@ export default function App() {
         for (let row of purchaseItems) {
           const prod = row.productId ? products.find(p => p.id === parseInt(row.productId, 10)) : null;
           const qty = parseInt(row.qty, 10) || 0;
-          if (qty <= 0) return alert('Enter a valid quantity for every item.');
-          if (!prod && !row.productName) return alert('Select a product or enter an item description for every row.');
+          if (qty <= 0) return showToast('Enter a valid quantity for every item.');
+          if (!prod && !row.productName) return showToast('Select a product or enter an item description for every row.');
           const unitCost = parseFloat(row.unitCost) || 0;
           let receivedQty = row.receivedQty === '' || row.receivedQty === undefined || row.receivedQty === null
             ? qty : parseInt(row.receivedQty, 10);
@@ -1375,27 +1397,40 @@ export default function App() {
           ));
         }
 
-        // Whatever quantity actually arrived goes straight into stock, automatically —
-        // only for brand-new purchases, and only the receivedQty of each item (not the
-        // full ordered qty), so an item the vendor only part-shipped doesn't overcredit
-        // stock. Later batches of the same purchase are received from the Advance
-        // Payments page instead, which applies its own stock delta — this keeps stock
-        // changes from ever double-counting on a subsequent edit of this purchase.
-        if (!editingItem) {
-          const deltaByProduct = {};
+        // Whatever quantity actually arrived affects stock automatically. For a brand-new
+        // purchase that's simply +receivedQty per product. For an EDIT, only the CHANGE in
+        // receivedQty per product is applied — so correcting a mistake (e.g. you entered 10
+        // but only actually got 6) properly pulls the extra units back out of stock, instead
+        // of leaving the original wrong amount sitting in inventory forever. Matched by
+        // product ID across the whole purchase rather than row-by-row, so it's correct even
+        // if a row's product was changed or rows were added/removed during the edit.
+        {
+          const oldReceivedByProduct = {};
+          if (editingItem) {
+            (editingItem.items || []).forEach(i => {
+              if (i.productId) oldReceivedByProduct[i.productId] = (oldReceivedByProduct[i.productId] || 0) + (i.receivedQty || 0);
+            });
+          }
+          const newReceivedByProduct = {};
           processedItems.forEach(i => {
-            if (i.productId && i.receivedQty > 0) {
-              deltaByProduct[i.productId] = (deltaByProduct[i.productId] || 0) + i.receivedQty;
-            }
+            if (i.productId) newReceivedByProduct[i.productId] = (newReceivedByProduct[i.productId] || 0) + (i.receivedQty || 0);
+          });
+          const deltaByProduct = {};
+          new Set([...Object.keys(oldReceivedByProduct), ...Object.keys(newReceivedByProduct)]).forEach(pid => {
+            const delta = (newReceivedByProduct[pid] || 0) - (oldReceivedByProduct[pid] || 0);
+            if (delta !== 0) deltaByProduct[pid] = delta;
           });
           const ids = Object.keys(deltaByProduct);
           if (ids.length) {
-            await Promise.all(ids.map(pid => {
+            const newStockByProduct = {};
+            ids.forEach(pid => {
               const prod = products.find(p => p.id === parseInt(pid, 10));
-              if (!prod) return null;
-              return supabase.from('products').update({ stock: prod.stock + deltaByProduct[pid] }).eq('id', prod.id);
-            }));
-            setProducts(prev => prev.map(p => deltaByProduct[p.id] ? { ...p, stock: p.stock + deltaByProduct[p.id] } : p));
+              if (prod) newStockByProduct[pid] = Math.max(0, prod.stock + deltaByProduct[pid]);
+            });
+            await Promise.all(Object.entries(newStockByProduct).map(([pid, newStock]) =>
+              supabase.from('products').update({ stock: newStock }).eq('id', parseInt(pid, 10))
+            ));
+            setProducts(prev => prev.map(p => newStockByProduct[p.id] !== undefined ? { ...p, stock: newStockByProduct[p.id] } : p));
           }
         }
 
@@ -1417,9 +1452,9 @@ export default function App() {
           setTransactions([newTxn, ...transactions]);
         }
       } else if (activeTab === 'Expenses') {
-        if (!formData.category) return alert('Please choose an expense category.');
+        if (!formData.category) return showToast('Please choose an expense category.');
         const amount = parseFloat(formData.amount) || 0;
-        if (amount <= 0) return alert('Please enter an amount greater than 0.');
+        if (amount <= 0) return showToast('Please enter an amount greater than 0.');
 
         if (editingItem) {
           const oldAmount = editingItem.amount || 0;
@@ -1448,7 +1483,7 @@ export default function App() {
         }
       } else if (activeTab === 'Warehouse') {
         const qty = parseInt(formData.qty, 10) || 0;
-        if (qty < 0) return alert('Quantity cannot be negative.');
+        if (qty < 0) return showToast('Quantity cannot be negative.');
         const prod = formData.productId ? products.find(p => p.id === parseInt(formData.productId, 10)) : null;
         const warehouseData = {
           productId: prod ? prod.id : null,
@@ -1471,7 +1506,7 @@ export default function App() {
       setFormData({});
       setShowModal(false);
     } catch (err) {
-      alert('Could not save — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not save — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -1490,17 +1525,23 @@ export default function App() {
       if (error) throw error;
     } catch (err) {
       setProducts(products.map(p => p.id === product.id ? { ...p, stock: product.stock } : p)); // revert on failure
-      alert('Could not update stock — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not update stock — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
-  const handleTransferToShop = async (warehouseItem) => {
+  const handleTransferToShop = (warehouseItem) => {
+    setTransferModal(warehouseItem);
+    setTransferQtyInput(String(warehouseItem.qty));
+  };
+
+  const submitTransferToShop = async (e) => {
+    e.preventDefault();
+    if (!transferModal) return;
+    const warehouseItem = transferModal;
     const maxQty = warehouseItem.qty;
-    const input = window.prompt(`How many units of "${warehouseItem.productName}" to move to the shop? (Available in warehouse: ${maxQty})`, String(maxQty));
-    if (input === null) return;
-    const transferQty = parseInt(input, 10);
-    if (!transferQty || transferQty <= 0) return alert('Please enter a quantity greater than 0.');
-    if (transferQty > maxQty) return alert(`You only have ${maxQty} units in the warehouse.`);
+    const transferQty = parseInt(transferQtyInput, 10);
+    if (!transferQty || transferQty <= 0) return showToast('Please enter a quantity greater than 0.');
+    if (transferQty > maxQty) return showToast(`You only have ${maxQty} units in the warehouse.`);
 
     try {
       const remaining = maxQty - transferQty;
@@ -1523,13 +1564,15 @@ export default function App() {
           if (stockError) throw stockError;
           setProducts(products.map(p => p.id === prod.id ? { ...p, stock: newStock } : p));
         } else {
-          alert(`Moved ${transferQty} units out of the warehouse, but couldn't find a matching shop product to add them to — you may need to add stock manually.`);
+          showToast(`Moved ${transferQty} units out of the warehouse, but couldn't find a matching shop product to add them to — you may need to add stock manually.`);
         }
       } else {
-        alert(`Moved ${transferQty} units out of the warehouse. This item isn't linked to a shop product, so add it manually on the Products page if needed.`);
+        showToast(`Moved ${transferQty} units out of the warehouse. This item isn't linked to a shop product, so add it manually on the Products page if needed.`);
       }
+      setTransferModal(null);
+      setTransferQtyInput('');
     } catch (err) {
-      alert('Could not transfer stock — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not transfer stock — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -1549,7 +1592,7 @@ export default function App() {
     const { purchase, itemIndex, item, pendingQty } = receiveModal;
 
     let receiveNow = parseInt(receiveQtyInput, 10);
-    if (isNaN(receiveNow) || receiveNow <= 0) return alert('Enter a valid quantity greater than 0.');
+    if (isNaN(receiveNow) || receiveNow <= 0) return showToast('Enter a valid quantity greater than 0.');
     if (receiveNow > pendingQty) receiveNow = pendingQty;
 
     const updatedItems = purchase.items.map((it, idx) =>
@@ -1574,7 +1617,7 @@ export default function App() {
       setReceiveModal(null);
       setReceiveQtyInput('');
     } catch (err) {
-      alert('Could not update — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not update — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
@@ -1607,6 +1650,30 @@ export default function App() {
             })
           );
           setProducts(restoredProducts);
+        }
+      }
+
+      if (type === 'Purchases') {
+        // Whatever quantity this purchase had credited to stock (via receivedQty on each
+        // item, either at creation or later through "Mark as Received") must come back out
+        // — otherwise deleting a purchase leaves the stock permanently inflated.
+        if (purchaseToDelete) {
+          const receivedByProduct = {};
+          (purchaseToDelete.items || []).forEach(i => {
+            if (i.productId && i.receivedQty > 0) receivedByProduct[i.productId] = (receivedByProduct[i.productId] || 0) + i.receivedQty;
+          });
+          const ids = Object.keys(receivedByProduct);
+          if (ids.length) {
+            const newStockByProduct = {};
+            ids.forEach(pid => {
+              const prod = products.find(p => p.id === parseInt(pid, 10));
+              if (prod) newStockByProduct[pid] = Math.max(0, prod.stock - receivedByProduct[pid]);
+            });
+            await Promise.all(Object.entries(newStockByProduct).map(([pid, newStock]) =>
+              supabase.from('products').update({ stock: newStock }).eq('id', parseInt(pid, 10))
+            ));
+            setProducts(prev => prev.map(p => newStockByProduct[p.id] !== undefined ? { ...p, stock: newStockByProduct[p.id] } : p));
+          }
         }
       }
 
@@ -1660,27 +1727,32 @@ export default function App() {
       }
       setDeleteConfirm(null);
     } catch (err) {
-      alert('Could not delete — ' + (err.message || 'please check your internet connection and try again.'));
+      showToast('Could not delete — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
   };
 
-  const handleResetAllData = async () => {
-    if (!window.confirm("This will permanently delete ALL your shop data — products, sales, customers, everything — from the cloud database. This cannot be undone. Consider exporting a backup first. Continue?")) return;
-    if (!window.confirm("Are you absolutely sure? This is your last chance to cancel.")) return;
-    try {
-      await Promise.all([
-        supabase.from('sales').delete().gte('created_at', '1900-01-01'),
-        supabase.from('transactions').delete().gte('created_at', '1900-01-01'),
-        supabase.from('products').delete().gte('created_at', '1900-01-01'),
-        supabase.from('categories').delete().gte('created_at', '1900-01-01'),
-        supabase.from('customers').delete().gte('created_at', '1900-01-01'),
-        supabase.from('suppliers').delete().gte('created_at', '1900-01-01'),
-      ]);
-      setSales([]); setTransactions([]); setProducts([]); setCategories([]); setCustomers([]); setSuppliers([]);
-      alert('All shop data has been reset.');
-    } catch (err) {
-      alert('Could not reset data — ' + (err.message || 'please check your internet connection and try again.'));
-    }
+  const handleResetAllData = () => {
+    askConfirm(
+      'This will permanently delete ALL your shop data — products, sales, customers, everything — from the cloud database. This cannot be undone. Consider exporting a backup first. Continue?',
+      () => {
+        askConfirm('Are you absolutely sure? This is your last chance to cancel.', async () => {
+          try {
+            const tables = ['sales', 'transactions', 'purchases', 'damaged_products', 'warehouse_stock', 'products', 'categories', 'customers', 'suppliers'];
+            const results = await Promise.all(tables.map(t => supabase.from(t).delete().gte('created_at', '1900-01-01')));
+            const failed = results.findIndex(r => r.error);
+            if (failed !== -1) throw new Error(`Could not clear "${tables[failed]}" (${results[failed].error.message}).`);
+            await supabase.from('shop_settings').update({ cash_balance: 0 }).eq('user_id', session.user.id);
+            setSales([]); setTransactions([]); setPurchases([]); setDamagedProducts([]); setWarehouseStock([]);
+            setProducts([]); setCategories([]); setCustomers([]); setSuppliers([]);
+            setShopSettings(prev => ({ ...prev, cashBalance: 0 }));
+            showToast('All shop data has been reset.', 'success');
+          } catch (err) {
+            showToast('Could not reset data — ' + (err.message || 'please check your internet connection and try again.'), 'error');
+          }
+        }, { confirmLabel: 'Yes, Delete Everything', danger: true });
+      },
+      { confirmLabel: 'Continue', danger: true }
+    );
   };
 
   const handlePrint = () => {
@@ -1735,25 +1807,19 @@ export default function App() {
           Array.isArray(data.suppliers) || Array.isArray(data.transactions)
         );
         if (!looksValid) {
-          alert('This file does not look like a valid backup. Import cancelled.');
+          showToast('This file does not look like a valid backup. Import cancelled.');
           return;
         }
 
-        if (!window.confirm('Importing will REPLACE all your current cloud data with this backup file (existing data will be deleted first). Continue?')) {
-          return;
-        }
-
-        // Wipe existing cloud data first, same as a full reset
-        await Promise.all([
-          supabase.from('sales').delete().gte('created_at', '1900-01-01'),
-          supabase.from('transactions').delete().gte('created_at', '1900-01-01'),
-          supabase.from('purchases').delete().gte('created_at', '1900-01-01'),
-          supabase.from('damaged_products').delete().gte('created_at', '1900-01-01'),
-          supabase.from('products').delete().gte('created_at', '1900-01-01'),
-          supabase.from('categories').delete().gte('created_at', '1900-01-01'),
-          supabase.from('customers').delete().gte('created_at', '1900-01-01'),
-          supabase.from('suppliers').delete().gte('created_at', '1900-01-01'),
-        ]);
+        askConfirm('Importing will REPLACE all your current cloud data with this backup file (existing data will be deleted first). Continue?', async () => {
+        try {
+        // Wipe existing cloud data first, same as a full reset. Each delete's result is
+        // checked — Supabase resolves with { error } rather than throwing, so an ignored
+        // failure here would leave old rows behind and cause a confusing duplicate-key error later.
+        const wipeTables = ['sales', 'transactions', 'purchases', 'damaged_products', 'products', 'categories', 'customers', 'suppliers'];
+        const wipeResults = await Promise.all(wipeTables.map(t => supabase.from(t).delete().gte('created_at', '1900-01-01')));
+        const wipeFailed = wipeResults.findIndex(r => r.error);
+        if (wipeFailed !== -1) throw new Error(`Could not clear existing "${wipeTables[wipeFailed]}" data before restoring (${wipeResults[wipeFailed].error.message}).`);
 
         let newCategories = [], newProducts = [], newCustomers = [], newSuppliers = [], newSales = [], newTransactions = [], newPurchases = [], newDamaged = [];
         const productIdMap = {}; // old product id (from the backup file) -> new DB-generated id
@@ -1836,9 +1902,13 @@ export default function App() {
           setSettingsForm(merged);
         }
 
-        alert('Backup restored successfully to your cloud database!');
+        showToast('Backup restored successfully to your cloud database!', 'success');
+        } catch (err) {
+          showToast('Could not import backup — ' + (err.message || 'please check the file and your internet connection.'), 'error');
+        }
+        }, { confirmLabel: 'Replace My Data', danger: true });
       } catch (err) {
-        alert('Could not import backup — ' + (err.message || 'please check the file and your internet connection.'));
+        showToast('Could not import backup — ' + (err.message || 'please check the file and your internet connection.'), 'error');
       }
     };
     reader.readAsText(file);
@@ -1858,7 +1928,7 @@ export default function App() {
         const data = JSON.parse(event.target.result);
         const incoming = Array.isArray(data) ? data : data.products;
         if (!Array.isArray(incoming) || incoming.length === 0) {
-          alert('This file does not look like a product list. Expected an array of products, or an object with a "products" array.');
+          showToast('This file does not look like a product list. Expected an array of products, or an object with a "products" array.');
           return;
         }
 
@@ -1879,15 +1949,17 @@ export default function App() {
             stock: np.stock ?? 0,
             reorderLevel: np.reorderLevel ?? 3,
             active: np.active !== false,
+            // Keep an existing product's code / wholesale price unless the file supplies its own,
+            // so a re-import never blanks them out.
+            productCode: np.productCode ?? match?.productCode ?? null,
+            wholesalePrice: np.wholesalePrice ?? match?.wholesalePrice ?? null,
           };
           if (match) toUpdate.push({ id: match.id, productData });
           else toInsert.push(productData);
         }
 
-        if (!window.confirm(`This will update ${toUpdate.length} existing product(s) and add ${toInsert.length} new product(s). Everything else in your shop stays untouched. Continue?`)) {
-          return;
-        }
-
+        askConfirm(`This will update ${toUpdate.length} existing product(s) and add ${toInsert.length} new product(s). Everything else in your shop stays untouched. Continue?`, async () => {
+        try {
         await Promise.all(toUpdate.map(u => supabase.from('products').update(dbMap.product.toDb(u.productData)).eq('id', u.id)));
 
         let insertedRows = [];
@@ -1905,9 +1977,13 @@ export default function App() {
           ...insertedRows,
         ]);
 
-        alert(`Done — ${toUpdate.length} product(s) updated, ${toInsert.length} added.`);
+        showToast(`Done — ${toUpdate.length} product(s) updated, ${toInsert.length} added.`, 'success');
+        } catch (err) {
+          showToast('Could not import products — ' + (err.message || 'please check the file and your internet connection.'), 'error');
+        }
+        });
       } catch (err) {
-        alert('Could not import products — ' + (err.message || 'please check the file and your internet connection.'));
+        showToast('Could not import products — ' + (err.message || 'please check the file and your internet connection.'), 'error');
       }
     };
     reader.readAsText(file);
@@ -1925,7 +2001,7 @@ export default function App() {
         const data = JSON.parse(event.target.result);
         const incoming = Array.isArray(data) ? data : data.customers;
         if (!Array.isArray(incoming) || incoming.length === 0) {
-          alert('This file does not look like a customer list. Expected an array of customers, or an object with a "customers" array.');
+          showToast('This file does not look like a customer list. Expected an array of customers, or an object with a "customers" array.');
           return;
         }
 
@@ -1936,17 +2012,21 @@ export default function App() {
           .map(c => ({ name: c.name || 'Walk-in Customer', email: c.email || '', phone: c.phone || '', address: c.address || '' }));
 
         if (toInsert.length === 0) {
-          alert('No new customers to add — everyone in this file already matches an existing customer.');
+          showToast('No new customers to add — everyone in this file already matches an existing customer.');
           return;
         }
-        if (!window.confirm(`This will add ${toInsert.length} new customer(s). Continue?`)) return;
-
-        const { data: inserted, error } = await supabase.from('customers').insert(toInsert.map(dbMap.customer.toDb)).select();
-        if (error) throw error;
-        setCustomers(prev => [...prev, ...inserted.map(dbMap.customer.fromDb)]);
-        alert(`Added ${inserted.length} new customer(s).`);
+        askConfirm(`This will add ${toInsert.length} new customer(s). Continue?`, async () => {
+          try {
+            const { data: inserted, error } = await supabase.from('customers').insert(toInsert.map(dbMap.customer.toDb)).select();
+            if (error) throw error;
+            setCustomers(prev => [...prev, ...inserted.map(dbMap.customer.fromDb)]);
+            showToast(`Added ${inserted.length} new customer(s).`, 'success');
+          } catch (err) {
+            showToast('Could not import customers — ' + (err.message || 'please check the file and your internet connection.'), 'error');
+          }
+        });
       } catch (err) {
-        alert('Could not import customers — ' + (err.message || 'please check the file and your internet connection.'));
+        showToast('Could not import customers — ' + (err.message || 'please check the file and your internet connection.'), 'error');
       }
     };
     reader.readAsText(file);
@@ -1986,18 +2066,20 @@ export default function App() {
 
   const handleAssignAllProductCodes = async () => {
     if (productsWithoutCode.length === 0) return;
-    if (!window.confirm(`Assign sequential codes (starting from ${nextProductCode(products)}) to the ${productsWithoutCode.length} product(s) that don't have one yet?`)) return;
-    try {
-      let nextCode = nextProductCode(products);
-      const updates = productsWithoutCode.map(p => ({ id: p.id, productCode: String(nextCode++) }));
-      await Promise.all(updates.map(u => supabase.from('products').update({ product_code: u.productCode }).eq('id', u.id)));
-      setProducts(prev => prev.map(p => {
-        const u = updates.find(x => x.id === p.id);
-        return u ? { ...p, productCode: u.productCode } : p;
-      }));
-    } catch (err) {
-      alert('Could not assign codes — ' + (err.message || 'please check your internet connection and try again.'));
-    }
+    askConfirm(`Assign sequential codes (starting from ${nextProductCode(products)}) to the ${productsWithoutCode.length} product(s) that don't have one yet?`, async () => {
+      try {
+        let nextCode = nextProductCode(products);
+        const updates = productsWithoutCode.map(p => ({ id: p.id, productCode: String(nextCode++) }));
+        await Promise.all(updates.map(u => supabase.from('products').update({ product_code: u.productCode }).eq('id', u.id)));
+        setProducts(prev => prev.map(p => {
+          const u = updates.find(x => x.id === p.id);
+          return u ? { ...p, productCode: u.productCode } : p;
+        }));
+        showToast(`Assigned codes to ${updates.length} product(s).`, 'success');
+      } catch (err) {
+        showToast('Could not assign codes — ' + (err.message || 'please check your internet connection and try again.'), 'error');
+      }
+    }, { confirmLabel: 'Assign Codes' });
   };
 
   // Backup reminder — nudge if it's been a while (or never) since the last export.
@@ -2973,6 +3055,79 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* MOVE TO SHOP MODAL — replaces the native window.prompt() for warehouse transfers */}
+        {transferModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm p-4 no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-full max-w-[95vw] md:w-[420px] transition-colors">
+              <div className="flex justify-between items-center mb-5">
+                <h3 className="text-lg font-bold text-[var(--text-primary)]">Move to Shop</h3>
+                <button onClick={() => setTransferModal(null)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+              </div>
+              <form onSubmit={submitTransferToShop} className="space-y-4 text-sm">
+                <div className="bg-[var(--bg-hover)] rounded-xl p-4 border border-[var(--border-card)]">
+                  <p className="text-[var(--text-muted)] text-xs font-bold uppercase tracking-wide mb-1">Item</p>
+                  <p className="text-[var(--text-primary)] font-bold">{transferModal.productName}</p>
+                  <p className="text-[var(--text-secondary)] text-xs mt-1">Available in warehouse: {transferModal.qty}</p>
+                </div>
+                <div>
+                  <label className="block text-[var(--text-secondary)] font-semibold mb-1.5">How many units to move to the shop?</label>
+                  <input
+                    required autoFocus type="number" min="1" max={transferModal.qty}
+                    value={transferQtyInput}
+                    onChange={(e) => setTransferQtyInput(e.target.value)}
+                    className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400 font-bold"
+                  />
+                </div>
+                <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
+                  <button type="button" onClick={() => setTransferModal(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                  <button type="submit" className="px-6 py-2.5 bg-orange-500 text-white rounded-xl font-bold text-sm hover:bg-orange-600">Move to Shop</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* GENERIC CONFIRM MODAL — replaces every native window.confirm() so questions
+           appear inside the software's own UI instead of a browser popup. */}
+        {confirmModal && (
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-[60] backdrop-blur-sm p-4 no-print">
+            <div className="bg-[var(--bg-card)] rounded-2xl p-8 shadow-2xl border border-[var(--border-card)] w-full max-w-[95vw] md:w-[440px] transition-colors">
+              <div className="flex items-start gap-4 mb-6">
+                <div className={`rounded-full p-3 flex-shrink-0 ${confirmModal.danger ? 'bg-red-100' : 'bg-orange-100'}`}>
+                  <AlertTriangle className={`w-5 h-5 ${confirmModal.danger ? 'text-red-600' : 'text-orange-600'}`} />
+                </div>
+                <p className="text-[var(--text-primary)] text-sm leading-relaxed pt-1">{confirmModal.message}</p>
+              </div>
+              <div className="flex justify-end gap-3">
+                <button onClick={() => setConfirmModal(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
+                <button
+                  onClick={() => { const fn = confirmModal.onYes; setConfirmModal(null); if (fn) fn(); }}
+                  className={`px-6 py-2.5 text-white rounded-xl font-bold text-sm transition-colors ${confirmModal.danger ? 'bg-red-600 hover:bg-red-700' : 'bg-orange-500 hover:bg-orange-600'}`}
+                >
+                  {confirmModal.confirmLabel}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TOASTS — in-app notifications replacing every native alert() popup */}
+        <div className="fixed top-5 right-5 z-[70] flex flex-col gap-3 w-[340px] max-w-[calc(100vw-2.5rem)] no-print pointer-events-none">
+          {toasts.map(t => (
+            <div
+              key={t.id}
+              className={`pointer-events-auto flex items-start gap-3 rounded-xl shadow-xl border p-4 text-sm font-medium backdrop-blur-sm ${
+                t.type === 'error' ? 'bg-red-50 border-red-200 text-red-800'
+                : t.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-[var(--bg-card)] border-[var(--border-card)] text-[var(--text-primary)]'
+              }`}
+            >
+              <span className="flex-1 leading-snug">{t.message}</span>
+              <button onClick={() => dismissToast(t.id)} className="shrink-0 opacity-60 hover:opacity-100"><X className="w-4 h-4" /></button>
+            </div>
+          ))}
+        </div>
 
         {/* ADD PREVIOUS DUE MODAL — records a customer's pre-existing balance without a real sale */}
         {showPreviousDueModal && (
