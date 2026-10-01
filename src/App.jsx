@@ -59,6 +59,7 @@ const defaultTransactions = [
 ];
 
 const EXPENSE_CATEGORIES = ['Food/Eating', 'Delivery/Transport', 'Rent', 'Utilities', 'Staff/Salary', 'Maintenance', 'Marketing', 'Other'];
+const PAYMENT_METHODS = ['Cash', 'bKash', 'Rocket', 'Nagad', 'Bank Transfer', 'Card', 'Other'];
 
 // How many days old a due date is — used to flag overdue customer/vendor dues.
 const daysOverdue = (dateStr) => {
@@ -147,6 +148,7 @@ const dbMap = {
       total_cost_amount: s.totalCostAmount, status: s.status, sale_date: s.date,
       paid_amount: s.paidAmount !== undefined && s.paidAmount !== null ? s.paidAmount : s.totalSellAmount,
       sale_type: s.saleType || 'Retail',
+      payment_method: s.paymentMethod || 'Cash',
     }),
     fromDb: (r) => ({
       id: r.id, customer: r.customer, customerPhone: r.customer_phone, customerAddress: r.customer_address,
@@ -155,6 +157,7 @@ const dbMap = {
       status: r.status, date: r.sale_date,
       paidAmount: r.paid_amount !== null && r.paid_amount !== undefined ? Number(r.paid_amount) : Number(r.total_sell_amount),
       saleType: r.sale_type || 'Retail',
+      paymentMethod: r.payment_method || 'Cash',
     }),
   },
   purchase: {
@@ -176,6 +179,7 @@ const dbMap = {
         unit_cost: first.unitCost ?? p.unitCost ?? 0,
         total_amount: p.totalAmount, paid_amount: p.paidAmount, status: p.status, purchase_date: p.date,
         received: p.received !== false,
+        payment_method: p.paymentMethod || 'Cash',
       };
     },
     fromDb: (r) => {
@@ -201,12 +205,13 @@ const dbMap = {
         dueAmount: Math.max(0, Number(r.total_amount) - Number(r.paid_amount)),
         status: r.status, date: r.purchase_date,
         received: items.length === 0 || items.every(i => (i.receivedQty ?? i.qty) >= i.qty),
+        paymentMethod: r.payment_method || 'Cash',
       };
     },
   },
   transaction: {
-    toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status, category: t.category || '', note: t.note || '' }),
-    fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '' }),
+    toDb: (t) => ({ id: t.id, ref_id: t.refId, type: t.type, amount: t.amount, txn_date: t.date, status: t.status, category: t.category || '', note: t.note || '', payment_method: t.paymentMethod || 'Cash' }),
+    fromDb: (r) => ({ id: r.id, refId: r.ref_id, type: r.type, amount: Number(r.amount), date: r.txn_date, status: r.status, category: r.category || '', note: r.note || '', paymentMethod: r.payment_method || 'Cash' }),
   },
   settings: {
     toDb: (s) => ({ shop_name: s.shopName, proprietor: s.proprietor, phone: s.phone, address: s.address, currency: s.currency, receipt_policies: s.receiptPolicies, cash_balance: s.cashBalance ?? 0, last_backup_at: s.lastBackupAt || null }),
@@ -531,11 +536,12 @@ export default function App() {
   // partial or full payment against a due sale/purchase without opening the full editor.
   const [paymentModal, setPaymentModal] = useState(null); // { kind: 'customer' | 'vendor', record }
   const [paymentAmountInput, setPaymentAmountInput] = useState('');
+  const [paymentMethodInput, setPaymentMethodInput] = useState('Cash');
 
   // "Add Money" modal on the Expenses page — logs a capital injection (owner deposit,
   // loan, cash from another source) into the business and tops up the cash balance.
   const [showAddMoneyModal, setShowAddMoneyModal] = useState(false);
-  const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+  const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', note: '', date: new Date().toISOString().split('T')[0], paymentMethod: 'Cash' });
 
   // "Process Return" modal on the Sales page — returns some or all items from a past
   // sale: restocks the product(s), shrinks the sale's total, and refunds any cash that's
@@ -614,6 +620,7 @@ export default function App() {
   const openPaymentModal = (kind, record) => {
     setPaymentModal({ kind, record });
     setPaymentAmountInput('');
+    setPaymentMethodInput(record.paymentMethod || 'Cash');
   };
 
   const submitRecordPayment = async (e) => {
@@ -622,6 +629,7 @@ export default function App() {
     const { kind, record } = paymentModal;
     const paymentNow = parseFloat(paymentAmountInput) || 0;
     if (paymentNow <= 0) return showToast('Enter a payment amount greater than 0.');
+    const method = paymentMethodInput || 'Cash';
 
     try {
       if (kind === 'customer') {
@@ -631,14 +639,14 @@ export default function App() {
         const actuallyApplied = newPaid - oldPaid; // in case the input overshoots the due amount
         const newStatus = newPaid >= total ? 'Paid' : 'Partial';
 
-        const { error: saleError } = await supabase.from('sales').update({ paid_amount: newPaid, status: newStatus }).eq('id', record.id);
+        const { error: saleError } = await supabase.from('sales').update({ paid_amount: newPaid, status: newStatus, payment_method: method }).eq('id', record.id);
         if (saleError) throw saleError;
         const { error: txnError } = await supabase.from('transactions')
-          .update({ status: newStatus === 'Paid' ? 'Success' : 'Pending' }).eq('ref_id', record.id);
+          .update({ status: newStatus === 'Paid' ? 'Success' : 'Pending', payment_method: method }).eq('ref_id', record.id);
         if (txnError) throw txnError;
 
-        setSales(prev => prev.map(s => s.id === record.id ? { ...s, paidAmount: newPaid, status: newStatus } : s));
-        setTransactions(prev => prev.map(t => t.refId === record.id ? { ...t, status: newStatus === 'Paid' ? 'Success' : 'Pending' } : t));
+        setSales(prev => prev.map(s => s.id === record.id ? { ...s, paidAmount: newPaid, status: newStatus, paymentMethod: method } : s));
+        setTransactions(prev => prev.map(t => t.refId === record.id ? { ...t, status: newStatus === 'Paid' ? 'Success' : 'Pending', paymentMethod: method } : t));
 
         // Cash actually came in from the customer.
         await adjustCashBalance(actuallyApplied);
@@ -649,10 +657,10 @@ export default function App() {
         const actuallyApplied = newPaid - oldPaid;
         const newStatus = newPaid >= total ? 'Paid' : 'Partial';
 
-        const { error } = await supabase.from('purchases').update({ paid_amount: newPaid, status: newStatus }).eq('id', record.id);
+        const { error } = await supabase.from('purchases').update({ paid_amount: newPaid, status: newStatus, payment_method: method }).eq('id', record.id);
         if (error) throw error;
 
-        setPurchases(prev => prev.map(p => p.id === record.id ? { ...p, paidAmount: newPaid, status: newStatus, dueAmount: Math.max(0, total - newPaid) } : p));
+        setPurchases(prev => prev.map(p => p.id === record.id ? { ...p, paidAmount: newPaid, status: newStatus, dueAmount: Math.max(0, total - newPaid), paymentMethod: method } : p));
 
         // Cash actually went out to the supplier.
         await adjustCashBalance(-actuallyApplied);
@@ -678,6 +686,7 @@ export default function App() {
         note: addMoneyForm.note || '',
         status: 'Success',
         date: addMoneyForm.date || new Date().toISOString().split('T')[0],
+        paymentMethod: addMoneyForm.paymentMethod || 'Cash',
       };
       const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newEntry));
       if (error) throw error;
@@ -691,7 +700,7 @@ export default function App() {
       }
 
       setShowAddMoneyModal(false);
-      setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+      setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0], paymentMethod: 'Cash' });
     } catch (err) {
       showToast('Could not save — ' + (err.message || 'please check your internet connection and try again.'), 'error');
     }
@@ -1152,6 +1161,7 @@ export default function App() {
           paidAmount: paidAmount,
           date: formData.date || new Date().toISOString().split('T')[0],
           saleType: formData.saleType || 'Retail',
+          paymentMethod: formData.paymentMethod || 'Cash',
         };
 
         // Auto-add this customer to the Customers list if they gave us details and
@@ -1218,7 +1228,8 @@ export default function App() {
             type: 'Income',
             amount: totalSellAmount,
             date: saleRecord.date,
-            status: saleRecord.status === 'Paid' ? 'Success' : 'Pending'
+            status: saleRecord.status === 'Paid' ? 'Success' : 'Pending',
+            paymentMethod: saleRecord.paymentMethod,
           };
           const { error: txnError } = await supabase.from('transactions').insert(dbMap.transaction.toDb(autoTransaction));
           if (txnError) throw txnError;
@@ -1364,6 +1375,7 @@ export default function App() {
           items: processedItems,
           totalAmount, paidAmount, status, received: fullyReceived,
           date: formData.date || new Date().toISOString().split('T')[0],
+          paymentMethod: formData.paymentMethod || 'Cash',
         };
 
         if (editingItem) {
@@ -1462,6 +1474,7 @@ export default function App() {
             ...editingItem, type: 'Expense', amount,
             category: formData.category, note: formData.note || '',
             date: formData.date || editingItem.date,
+            paymentMethod: formData.paymentMethod || editingItem.paymentMethod || 'Cash',
           };
           const { error } = await supabase.from('transactions').update(dbMap.transaction.toDb(updated)).eq('id', editingItem.id);
           if (error) throw error;
@@ -1475,6 +1488,7 @@ export default function App() {
             category: formData.category, note: formData.note || '',
             status: 'Success',
             date: formData.date || new Date().toISOString().split('T')[0],
+            paymentMethod: formData.paymentMethod || 'Cash',
           };
           const { error } = await supabase.from('transactions').insert(dbMap.transaction.toDb(newExpense));
           if (error) throw error;
@@ -2528,7 +2542,7 @@ export default function App() {
                 </select>
               </div>
             )}
-            {['Products', 'Categories', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses', 'Warehouse'].includes(activeTab) && (
+            {['Products', 'Categories', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Advance Payments', 'Expenses', 'Warehouse', 'Inventory'].includes(activeTab) && (
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -2618,7 +2632,7 @@ export default function App() {
         {/* Dynamic Add / Edit Modal */}
         {showModal && activeTab !== 'Sales' && (
           <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 backdrop-blur-sm no-print">
-            <div className={`bg-[var(--bg-card)] rounded-2xl p-5 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] max-h-[90vh] overflow-y-auto ${activeTab === 'Sales' ? 'md:w-[700px]' : 'md:w-[480px]'}`}>
+            <div className={`bg-[var(--bg-card)] rounded-2xl p-5 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] max-h-[90vh] overflow-y-auto ${activeTab === 'Purchases' ? 'md:w-[760px]' : 'md:w-[480px]'}`}>
               <div className="flex justify-between items-center mb-5">
                 <h3 className="text-lg font-bold text-[var(--text-primary)]">{editingItem ? 'Edit' : 'Add New'} {activeTab === 'Damaged' ? 'Damage Entry' : activeTab === 'Warehouse' ? 'Warehouse Stock' : activeTab.slice(0, -1)}</h3>
                 <button onClick={() => setShowModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
@@ -2638,29 +2652,13 @@ export default function App() {
                     </select>
                     <div className="flex gap-4">
                       <input required name="buyPrice" type="number" step="0.01" defaultValue={formData.buyPrice || ''} placeholder="Buy Price (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
-                      <div className="relative">
-                        <input
-                          required name="sellPrice" type="number" step="50"
-                          value={formData.sellPrice ?? ''}
-                          placeholder="Sell Price (Tk)"
-                          onChange={handleInputChange}
-                          className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 pr-16 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                        />
-                        <div className="absolute right-1.5 top-1.5 bottom-1.5 flex flex-col">
-                          <button
-                            type="button"
-                            onClick={() => setFormData({ ...formData, sellPrice: (parseFloat(formData.sellPrice) || 0) + 50 })}
-                            className="flex-1 px-1.5 text-[10px] font-bold text-orange-500 hover:text-orange-600 leading-none"
-                            title="Increase by 50"
-                          >▲</button>
-                          <button
-                            type="button"
-                            onClick={() => setFormData({ ...formData, sellPrice: Math.max(0, (parseFloat(formData.sellPrice) || 0) - 50) })}
-                            className="flex-1 px-1.5 text-[10px] font-bold text-orange-500 hover:text-orange-600 leading-none"
-                            title="Decrease by 50"
-                          >▼</button>
-                        </div>
-                      </div>
+                      <input
+                        required name="sellPrice" type="number" step="0.01"
+                        value={formData.sellPrice ?? ''}
+                        placeholder="Sell Price (Tk)"
+                        onChange={handleInputChange}
+                        className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
                     </div>
                     <div>
                       <input name="wholesalePrice" type="number" step="0.01" defaultValue={formData.wholesalePrice ?? ''} placeholder="Wholesale Price (Tk) — optional" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
@@ -2787,32 +2785,33 @@ export default function App() {
                                 className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
                               />
                             )}
-                            <div className="flex gap-2 items-center pl-1">
-                              <div className="flex-1">
+                            <div className="grid grid-cols-3 gap-2 pl-1">
+                              <div>
                                 <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Ordered Qty</label>
                                 <input
                                   required type="number" min="1" value={row.qty}
                                   onChange={(e) => handlePurchaseItemChange(idx, 'qty', e.target.value)}
-                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
+                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2.5 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
                                 />
                               </div>
-                              <div className="flex-1">
+                              <div>
                                 <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Unit Cost (Tk)</label>
                                 <input
                                   required type="number" step="0.01" value={row.unitCost}
                                   onChange={(e) => handlePurchaseItemChange(idx, 'unitCost', e.target.value)}
-                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400"
+                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2.5 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-orange-400"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Received Now</label>
+                                <input
+                                  type="number" min="0" max={qtyNum || undefined} value={row.receivedQty}
+                                  onChange={(e) => handlePurchaseItemChange(idx, 'receivedQty', e.target.value)}
+                                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2.5 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
                                 />
                               </div>
                             </div>
-                            <div className="pl-1">
-                              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase">Received Qty Now (leave lower than Ordered if the vendor only sent part)</label>
-                              <input
-                                type="number" min="0" max={qtyNum || undefined} value={row.receivedQty}
-                                onChange={(e) => handlePurchaseItemChange(idx, 'receivedQty', e.target.value)}
-                                className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-2 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-orange-400"
-                              />
-                            </div>
+                            <p className="text-[10px] text-[var(--text-muted)] pl-1">Leave "Received Now" lower than "Ordered Qty" if the vendor only sent part of it.</p>
                             {pendingNum > 0 && (
                               <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-[11px] font-bold px-2 py-1 rounded-lg">
                                 ⏳ {pendingNum} unit{pendingNum !== 1 ? 's' : ''} still pending — will show on Advance Payments
@@ -2836,7 +2835,12 @@ export default function App() {
                       );
                     })()}
 
-                    <input name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''} placeholder="Amount Paid Now (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <input name="paidAmount" type="number" step="0.01" defaultValue={formData.paidAmount || ''} placeholder="Amount Paid Now (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                      <select name="paymentMethod" defaultValue={formData.paymentMethod || 'Cash'} onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                        {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </div>
                     <p className="text-xs text-[var(--text-muted)]">
                       Leave "Amount Paid Now" blank or 0 for a fully due purchase, equal to the total for fully paid, or anything in between for a partial/half-due payment. The remaining due amount will show on the Due Amounts page under this supplier.
                     </p>
@@ -2957,6 +2961,9 @@ export default function App() {
                       {EXPENSE_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                     </select>
                     <input required name="amount" type="number" step="0.01" defaultValue={formData.amount || ''} placeholder="Amount (Tk)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                    <select name="paymentMethod" defaultValue={formData.paymentMethod || 'Cash'} onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                      {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
                     <input name="date" type="date" defaultValue={formData.date || new Date().toISOString().split('T')[0]} onChange={handleInputChange} max={new Date().toISOString().split('T')[0]} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="note" defaultValue={formData.note || ''} placeholder="Note (optional — e.g. 'lunch for staff')" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                   </>
@@ -3237,6 +3244,17 @@ export default function App() {
                   </p>
                 </div>
 
+                <div>
+                  <label className="block text-[var(--text-secondary)] font-semibold mb-1.5">Paid via</label>
+                  <select
+                    value={paymentMethodInput}
+                    onChange={(e) => setPaymentMethodInput(e.target.value)}
+                    className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                  >
+                    {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+
                 <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-card)]">
                   <button type="button" onClick={() => setPaymentModal(null)} className="px-4 py-2.5 border border-[var(--input-border)] rounded-xl text-[var(--text-secondary)] font-semibold text-sm hover:bg-[var(--bg-hover)] transition-colors">Cancel</button>
                   <button type="submit" className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700">Record Payment</button>
@@ -3269,6 +3287,13 @@ export default function App() {
                   max={new Date().toISOString().split('T')[0]}
                   className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                 />
+                <select
+                  value={addMoneyForm.paymentMethod}
+                  onChange={(e) => setAddMoneyForm({ ...addMoneyForm, paymentMethod: e.target.value })}
+                  className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                >
+                  {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
                 <input
                   value={addMoneyForm.note}
                   onChange={(e) => setAddMoneyForm({ ...addMoneyForm, note: e.target.value })}
@@ -3815,10 +3840,18 @@ export default function App() {
             </div>
             {products.length === 0 ? (
               <EmptyState icon={Warehouse} title="No inventory yet" message="Add products to see your stock assets here." />
-            ) : (
+            ) : (() => {
+              const inventoryRows = [...products]
+                .filter(p => !currentSearch || p.name.toLowerCase().includes(currentSearch) || (p.category || '').toLowerCase().includes(currentSearch) || (p.productCode || '').toLowerCase().includes(currentSearch))
+                .sort((a, b) => a.name.localeCompare(b.name));
+              if (inventoryRows.length === 0) {
+                return <EmptyState icon={PackageSearch} title="No matching products" message="Try a different search term." />;
+              }
+              return (
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold">
+                  <th className="pb-3">CODE</th>
                   <th className="pb-3">PRODUCT ITEM</th>
                   <th className="pb-3">CATEGORY</th>
                   <th className="pb-3">UNIT BUY PRICE</th>
@@ -3827,8 +3860,9 @@ export default function App() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-card)]">
-                {[...products].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
+                {inventoryRows.map(p => (
                   <tr key={p.id} className={`hover:bg-[var(--bg-hover)] transition-colors ${p.active === false ? 'opacity-50' : ''}`}>
+                    <td className="py-4 text-[var(--text-muted)] font-mono text-xs">{p.productCode || '—'}</td>
                     <td className="py-4 font-bold text-[var(--text-primary)]">{p.name}</td>
                     <td className="py-4 text-[var(--text-secondary)]">{p.category}</td>
                     <td className="py-4 text-[var(--text-secondary)]">
@@ -3846,7 +3880,8 @@ export default function App() {
                 ))}
               </tbody>
             </table>
-            )}
+              );
+            })()}
           </div>
         )}
 
@@ -4076,6 +4111,14 @@ export default function App() {
                   placeholder="Amount Paid Now (Tk)" onChange={handleInputChange}
                   className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                 />
+              )}
+              {formData.status !== 'Due' && (
+                <div>
+                  <label className="block text-[11px] font-bold text-[var(--text-muted)] uppercase mb-1">Paid Via</label>
+                  <select name="paymentMethod" defaultValue={formData.paymentMethod || 'Cash'} onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400">
+                    {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
               )}
 
               {/* Live running total, so the amount is clear before you hit save */}
@@ -4743,7 +4786,12 @@ export default function App() {
                             );
                           })()}
                         </td>
-                        <td className="py-4 font-bold text-[var(--text-primary)]">Tk {t.amount.toLocaleString()}</td>
+                        <td className="py-4 font-bold text-[var(--text-primary)]">
+                          Tk {t.amount.toLocaleString()}
+                          {t.paymentMethod && t.paymentMethod !== 'Cash' && (
+                            <span className="block text-[11px] font-semibold text-[var(--text-muted)]">via {t.paymentMethod}</span>
+                          )}
+                        </td>
                         <td className="py-4 font-bold">
                           {profit === null ? <span className="text-[var(--text-muted)]">—</span> : (
                             <span className={profit >= 0 ? 'text-emerald-600' : 'text-red-600'}>Tk {profit.toLocaleString()}</span>
@@ -4861,7 +4909,7 @@ export default function App() {
                     <Calculator className="w-5 h-5" /> Close Till
                   </button>
                   <button
-                    onClick={() => { setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0] }); setShowAddMoneyModal(true); }}
+                    onClick={() => { setAddMoneyForm({ amount: '', note: '', date: new Date().toISOString().split('T')[0], paymentMethod: 'Cash' }); setShowAddMoneyModal(true); }}
                     className="bg-white text-emerald-700 font-bold text-sm px-5 py-3 rounded-xl flex items-center gap-2 shadow-md hover:bg-emerald-50 transition-colors"
                   >
                     <Banknote className="w-5 h-5" /> Add Money
@@ -4944,7 +4992,12 @@ export default function App() {
                           <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700">{t.category || 'Other'}</span>
                         </td>
                         <td className="py-4 text-[var(--text-secondary)]">{t.note || '—'}</td>
-                        <td className="py-4 font-bold text-[var(--text-primary)]">Tk {t.amount.toLocaleString()}</td>
+                        <td className="py-4 font-bold text-[var(--text-primary)]">
+                          Tk {t.amount.toLocaleString()}
+                          {t.paymentMethod && t.paymentMethod !== 'Cash' && (
+                            <span className="block text-[11px] font-semibold text-[var(--text-muted)]">via {t.paymentMethod}</span>
+                          )}
+                        </td>
                         <td className="py-4 text-right flex justify-end gap-1">
                           <button onClick={() => handleOpenEdit(t)} title="Edit Expense" className="text-[var(--text-muted)] hover:text-orange-600 p-2"><Pencil className="w-4 h-4" /></button>
                           <button onClick={() => handleDelete(t.id, 'Expenses')} title="Delete Expense" className="text-[var(--text-muted)] hover:text-red-600 p-2"><Trash2 className="w-4 h-4" /></button>
