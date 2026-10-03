@@ -2179,40 +2179,6 @@ export default function App() {
     return months;
   })();
 
-  // --- Reports page date range — defaults to the last 30 days, with quick presets
-  // and a custom start/end option, instead of always showing all-time totals. ---
-  const reportRangeBounds = (() => {
-    const todayIso = new Date().toISOString().split('T')[0];
-    if (reportRangePreset === 'allTime') return { start: null, end: null };
-    if (reportRangePreset === 'custom') return { start: reportRangeCustomStart, end: reportRangeCustomEnd };
-    if (reportRangePreset === 'thisMonth') return { start: `${todayIso.slice(0, 7)}-01`, end: todayIso };
-    const days = reportRangePreset === '7d' ? 6 : 29;
-    const d = new Date(); d.setDate(d.getDate() - days);
-    return { start: d.toISOString().split('T')[0], end: todayIso };
-  })();
-  const inReportRange = (dateStr) => {
-    if (!dateStr) return false;
-    if (reportRangeBounds.start && dateStr < reportRangeBounds.start) return false;
-    if (reportRangeBounds.end && dateStr > reportRangeBounds.end) return false;
-    return true;
-  };
-  const reportRangeSales = realSales.filter(s => inReportRange(s.date));
-  const reportRangeExpenses = expenseTransactions.filter(t => inReportRange(t.date));
-  const reportRangeSellAmount = reportRangeSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
-  const reportRangeCogs = reportRangeSales.reduce((sum, s) => sum + s.totalCostAmount, 0);
-  const reportRangeGrossProfit = reportRangeSellAmount - reportRangeCogs;
-  const reportRangeExpensesTotal = reportRangeExpenses.reduce((sum, t) => sum + t.amount, 0);
-  const reportRangeNetProfit = reportRangeGrossProfit - reportRangeExpensesTotal;
-  const reportRangeRetailSales = reportRangeSales.filter(s => (s.saleType || 'Retail') === 'Retail');
-  const reportRangeWholesaleSales = reportRangeSales.filter(s => s.saleType === 'Wholesale');
-  const reportRangeRetailRevenue = reportRangeRetailSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
-  const reportRangeRetailProfit = reportRangeRetailSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
-  const reportRangeWholesaleRevenue = reportRangeWholesaleSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
-  const reportRangeWholesaleProfit = reportRangeWholesaleSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
-  const reportRangeLabel = {
-    '7d': 'Last 7 Days', '30d': 'Last 30 Days', thisMonth: 'This Month', allTime: 'All Time', custom: 'Custom Range',
-  }[reportRangePreset];
-
   // Safe lookup map used by the generic tables instead of eval()
   const genericDataMap = { categories, customers, suppliers, damaged: damagedProducts, purchases };
 
@@ -2271,6 +2237,41 @@ export default function App() {
     return acc;
   }, {});
   const netProfitAfterExpenses = netProfit - totalExpensesAllTime;
+
+  // --- Reports page date range — defaults to the last 30 days, with quick presets
+  // and a custom start/end option, instead of always showing all-time totals. ---
+  const reportRangeBounds = (() => {
+    const todayIso = new Date().toISOString().split('T')[0];
+    if (reportRangePreset === 'allTime') return { start: null, end: null };
+    if (reportRangePreset === 'custom') return { start: reportRangeCustomStart, end: reportRangeCustomEnd };
+    if (reportRangePreset === 'thisMonth') return { start: `${todayIso.slice(0, 7)}-01`, end: todayIso };
+    const days = reportRangePreset === '7d' ? 6 : 29;
+    const d = new Date(); d.setDate(d.getDate() - days);
+    return { start: d.toISOString().split('T')[0], end: todayIso };
+  })();
+  const inReportRange = (dateStr) => {
+    if (!dateStr) return false;
+    if (reportRangeBounds.start && dateStr < reportRangeBounds.start) return false;
+    if (reportRangeBounds.end && dateStr > reportRangeBounds.end) return false;
+    return true;
+  };
+  const reportRangeSales = realSales.filter(s => inReportRange(s.date));
+  const reportRangeExpenses = expenseTransactions.filter(t => inReportRange(t.date));
+  const reportRangeSellAmount = reportRangeSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeCogs = reportRangeSales.reduce((sum, s) => sum + s.totalCostAmount, 0);
+  const reportRangeGrossProfit = reportRangeSellAmount - reportRangeCogs;
+  const reportRangeExpensesTotal = reportRangeExpenses.reduce((sum, t) => sum + t.amount, 0);
+  const reportRangeNetProfit = reportRangeGrossProfit - reportRangeExpensesTotal;
+  const reportRangeRetailSales = reportRangeSales.filter(s => (s.saleType || 'Retail') === 'Retail');
+  const reportRangeWholesaleSales = reportRangeSales.filter(s => s.saleType === 'Wholesale');
+  const reportRangeRetailRevenue = reportRangeRetailSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeRetailProfit = reportRangeRetailSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const reportRangeWholesaleRevenue = reportRangeWholesaleSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeWholesaleProfit = reportRangeWholesaleSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const reportRangeLabel = {
+    '7d': 'Last 7 Days', '30d': 'Last 30 Days', thisMonth: 'This Month', allTime: 'All Time', custom: 'Custom Range',
+  }[reportRangePreset];
+
 
   // --- Retail vs. Wholesale breakdown, for the Reports page ---
   const retailSales = realSales.filter(s => (s.saleType || 'Retail') === 'Retail');
