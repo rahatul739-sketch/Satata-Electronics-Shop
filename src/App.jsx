@@ -526,11 +526,18 @@ export default function App() {
   const [duePartyFilter, setDuePartyFilter] = useState('');
   // Reports tab: which date the daily breakdown is showing
   const [reportDate, setReportDate] = useState(() => new Date().toISOString().split('T')[0]);
+  // Reports page top summary now reflects a selectable range instead of always "all time".
+  const [reportRangePreset, setReportRangePreset] = useState('30d'); // '7d' | '30d' | 'thisMonth' | 'allTime' | 'custom'
+  const [reportRangeCustomStart, setReportRangeCustomStart] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 29);
+    return d.toISOString().split('T')[0];
+  });
+  const [reportRangeCustomEnd, setReportRangeCustomEnd] = useState(() => new Date().toISOString().split('T')[0]);
 
   // "Add Previous Due" modal — records an opening balance a customer already owed
   // before you started using this software, without touching product stock at all.
   const [showPreviousDueModal, setShowPreviousDueModal] = useState(false);
-  const [previousDueForm, setPreviousDueForm] = useState({ customer: '', customerPhone: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+  const [previousDueForm, setPreviousDueForm] = useState({ type: 'customer', customer: '', customerPhone: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
 
   // "Record Payment" modal on the Due Amounts page — a quick, dedicated way to log a
   // partial or full payment against a due sale/purchase without opening the full editor.
@@ -562,10 +569,15 @@ export default function App() {
   const [promoSentIds, setPromoSentIds] = useState([]);
   const [promoCustomerSearch, setPromoCustomerSearch] = useState('');
 
-  const handleOpenPreviousDue = (customer) => {
+  // Search/category filter for linking a Warehouse entry to a tracked product.
+  const [warehouseProductSearch, setWarehouseProductSearch] = useState('');
+  const [warehouseCategoryFilter, setWarehouseCategoryFilter] = useState('');
+
+  const handleOpenPreviousDue = (party, type = 'customer') => {
     setPreviousDueForm({
-      customer: customer ? customer.name : '',
-      customerPhone: customer ? (customer.phone || '') : '',
+      type,
+      customer: party ? party.name : '',
+      customerPhone: party ? (party.phone || party.contact || '') : '',
       amount: '', note: '', date: new Date().toISOString().split('T')[0]
     });
     setShowPreviousDueModal(true);
@@ -574,10 +586,45 @@ export default function App() {
   const handleSavePreviousDue = async (e) => {
     e.preventDefault();
     const amount = parseFloat(previousDueForm.amount) || 0;
-    if (!previousDueForm.customer.trim()) return showToast('Please enter a customer name.');
+    const partyType = previousDueForm.type || 'customer';
+    if (!previousDueForm.customer.trim()) return showToast(`Please enter a ${partyType === 'vendor' ? 'supplier' : 'customer'} name.`);
     if (amount <= 0) return showToast('Please enter a due amount greater than 0.');
 
     try {
+      if (partyType === 'vendor') {
+        // An externally-tracked due you already owed a supplier — logged as its own
+        // purchase record (no real goods attached) so it shows on the vendor side of
+        // Due Amounts without touching stock or the item-level purchase reports.
+        const purchaseId = await nextSequentialId(purchases.map(p => p.id), 'VDUE', '#VDUE-');
+        const purchaseRecord = {
+          id: purchaseId,
+          supplier: previousDueForm.customer.trim(),
+          items: [{
+            productId: null,
+            productName: previousDueForm.note?.trim() || 'Previous Due (Opening Balance)',
+            qty: 1, unitCost: amount, receivedQty: 0, lineTotal: amount,
+          }],
+          totalAmount: amount, paidAmount: 0, status: 'Due', received: true,
+          date: previousDueForm.date || new Date().toISOString().split('T')[0],
+          paymentMethod: 'Cash',
+        };
+        const { error } = await supabase.from('purchases').insert(dbMap.purchase.toDb(purchaseRecord));
+        if (error) throw error;
+        setPurchases(prev => [{ ...purchaseRecord, dueAmount: amount }, ...prev]);
+
+        const alreadyExists = suppliers.some(s => (s.company || '').toLowerCase() === purchaseRecord.supplier.toLowerCase());
+        if (!alreadyExists) {
+          const { data, error: supError } = await supabase.from('suppliers')
+            .insert(dbMap.supplier.toDb({ company: purchaseRecord.supplier, contact: '', email: '', phone: previousDueForm.customerPhone || '' }))
+            .select().single();
+          if (!supError && data) setSuppliers(prev => [...prev, dbMap.supplier.fromDb(data)]);
+        }
+
+        setShowPreviousDueModal(false);
+        showToast('Previous due recorded — it now shows on the Due Amounts page for this supplier.', 'success');
+        return;
+      }
+
       const orderId = await nextSequentialId(sales.map(s => s.id), 'DUE', '#DUE-');
       const saleRecord = {
         id: orderId,
@@ -892,6 +939,8 @@ export default function App() {
     setFormData(activeTab === 'Products' ? { productCode: String(nextProductCode(products)) } : {});
     setCartItems([{ productId: '', qty: 1, customSellPrice: 0, customProductPrice: 0, categoryFilter: '' }]);
     setPurchaseItems([{ productId: '', productName: '', category: '', qty: 1, unitCost: '', receivedQty: 1, categoryFilter: '' }]);
+    setWarehouseProductSearch('');
+    setWarehouseCategoryFilter('');
     setShowModal(true);
   };
 
@@ -908,6 +957,8 @@ export default function App() {
     setEditingItem(item);
     const normalizedItem = (activeTab === 'Sales' && item.status === 'Pending') ? { ...item, status: 'Due' } : item;
     setFormData({ ...normalizedItem });
+    setWarehouseProductSearch('');
+    setWarehouseCategoryFilter('');
     if (activeTab === 'Sales' && item.items) {
       setCartItems(item.items.map(i => ({
         productId: i.productId,
@@ -1517,7 +1568,15 @@ export default function App() {
         }
       }
 
-      setFormData({});
+      if (activeTab === 'Sales') {
+        // Sales is a permanent, always-visible entry screen (not a modal that closes),
+        // so it needs an explicit reset after every save — otherwise the cart and
+        // customer fields from the sale you just completed would just sit there.
+        resetSaleForm();
+        showToast(editingItem ? 'Sale updated.' : 'Sale completed — ready for the next one.', 'success');
+      } else {
+        setFormData({});
+      }
       setShowModal(false);
     } catch (err) {
       showToast('Could not save — ' + (err.message || 'please check your internet connection and try again.'), 'error');
@@ -2049,7 +2108,7 @@ export default function App() {
 
   const handleExportDailyReportCSV = () => {
     const headers = ['Date', 'Sales Paid', 'Sales With Due', 'Sales Total', 'Sales Due', 'COGS', 'Gross Profit', 'Expenses', 'Net Profit', 'Purchases Total', 'Purchases Paid', 'Purchases Due'];
-    const rows = [...last14DaysStats].reverse().map(d => [d.date, d.salesPaidTotal, d.salesWithDueTotal, d.salesTotal, d.salesDue, d.cogs, d.grossProfit, d.expensesTotal, d.netProfit, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
+    const rows = [...last30DaysStats].reverse().map(d => [d.date, d.salesPaidTotal, d.salesWithDueTotal, d.salesTotal, d.salesDue, d.cogs, d.grossProfit, d.expensesTotal, d.netProfit, d.purchasesTotal, d.purchasesPaid, d.purchasesDue]);
     const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -2120,6 +2179,40 @@ export default function App() {
     return months;
   })();
 
+  // --- Reports page date range — defaults to the last 30 days, with quick presets
+  // and a custom start/end option, instead of always showing all-time totals. ---
+  const reportRangeBounds = (() => {
+    const todayIso = new Date().toISOString().split('T')[0];
+    if (reportRangePreset === 'allTime') return { start: null, end: null };
+    if (reportRangePreset === 'custom') return { start: reportRangeCustomStart, end: reportRangeCustomEnd };
+    if (reportRangePreset === 'thisMonth') return { start: `${todayIso.slice(0, 7)}-01`, end: todayIso };
+    const days = reportRangePreset === '7d' ? 6 : 29;
+    const d = new Date(); d.setDate(d.getDate() - days);
+    return { start: d.toISOString().split('T')[0], end: todayIso };
+  })();
+  const inReportRange = (dateStr) => {
+    if (!dateStr) return false;
+    if (reportRangeBounds.start && dateStr < reportRangeBounds.start) return false;
+    if (reportRangeBounds.end && dateStr > reportRangeBounds.end) return false;
+    return true;
+  };
+  const reportRangeSales = realSales.filter(s => inReportRange(s.date));
+  const reportRangeExpenses = expenseTransactions.filter(t => inReportRange(t.date));
+  const reportRangeSellAmount = reportRangeSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeCogs = reportRangeSales.reduce((sum, s) => sum + s.totalCostAmount, 0);
+  const reportRangeGrossProfit = reportRangeSellAmount - reportRangeCogs;
+  const reportRangeExpensesTotal = reportRangeExpenses.reduce((sum, t) => sum + t.amount, 0);
+  const reportRangeNetProfit = reportRangeGrossProfit - reportRangeExpensesTotal;
+  const reportRangeRetailSales = reportRangeSales.filter(s => (s.saleType || 'Retail') === 'Retail');
+  const reportRangeWholesaleSales = reportRangeSales.filter(s => s.saleType === 'Wholesale');
+  const reportRangeRetailRevenue = reportRangeRetailSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeRetailProfit = reportRangeRetailSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const reportRangeWholesaleRevenue = reportRangeWholesaleSales.reduce((sum, s) => sum + s.totalSellAmount, 0);
+  const reportRangeWholesaleProfit = reportRangeWholesaleSales.reduce((sum, s) => sum + (s.totalSellAmount - s.totalCostAmount), 0);
+  const reportRangeLabel = {
+    '7d': 'Last 7 Days', '30d': 'Last 30 Days', thisMonth: 'This Month', allTime: 'All Time', custom: 'Custom Range',
+  }[reportRangePreset];
+
   // Safe lookup map used by the generic tables instead of eval()
   const genericDataMap = { categories, customers, suppliers, damaged: damagedProducts, purchases };
 
@@ -2129,7 +2222,7 @@ export default function App() {
     const salesFullyPaid = daySales.filter(s => s.status === 'Paid');
     const salesWithDue = daySales.filter(s => s.status !== 'Paid'); // Due or Partial
 
-    const dayPurchases = purchases.filter(p => p.date === dateStr);
+    const dayPurchases = purchases.filter(p => p.date === dateStr && !(p.id || '').startsWith('#VDUE-'));
     const dayExpenses = transactions.filter(t => t.type === 'Expense' && t.date === dateStr);
 
     const salesTotal = daySales.reduce((sum, s) => sum + s.totalSellAmount, 0);
@@ -2157,7 +2250,7 @@ export default function App() {
   };
   const selectedDayStats = dailyStatsFor(reportDate);
   // Last 14 calendar days (including today), most recent first, for the trend table
-  const last14DaysStats = Array.from({ length: 14 }, (_, i) => {
+  const last30DaysStats = Array.from({ length: 30 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - i);
     return dailyStatsFor(d.toISOString().split('T')[0]);
@@ -2555,10 +2648,18 @@ export default function App() {
             )}
             {activeTab === 'Customers' && (
               <button
-                onClick={() => handleOpenPreviousDue(null)}
+                onClick={() => handleOpenPreviousDue(null, 'customer')}
                 className="bg-white border-2 border-orange-500 text-orange-600 text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-50 shadow-sm transition-all"
               >
                 <Wallet className="w-5 h-5" /> Add Previous Due
+              </button>
+            )}
+            {activeTab === 'Due Amounts' && (
+              <button
+                onClick={() => handleOpenPreviousDue(null, 'customer')}
+                className="bg-white border-2 border-orange-500 text-orange-600 text-sm font-bold px-5 py-3 rounded-xl flex items-center gap-2 hover:bg-orange-50 shadow-sm transition-all"
+              >
+                <Wallet className="w-5 h-5" /> Add External Due
               </button>
             )}
             {['Products', 'Categories', 'Purchases', 'Damaged', 'Customers', 'Suppliers', 'Transactions', 'Expenses', 'Warehouse'].includes(activeTab) && (
@@ -2974,18 +3075,41 @@ export default function App() {
                     <p className="text-xs text-[var(--text-muted)]">
                       Link this to a shop product so "Transfer to Shop" can add straight into its stock — or leave it unlinked for a custom/unlisted item.
                     </p>
-                    <select
-                      name="productId"
-                      defaultValue={formData.productId || ''}
-                      onChange={(e) => {
-                        const prod = products.find(p => p.id === parseInt(e.target.value, 10));
-                        setFormData({ ...formData, productId: e.target.value, productName: prod ? prod.name : formData.productName, category: prod ? prod.category : formData.category });
-                      }}
-                      className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
-                    >
-                      <option value="">Not linked to a tracked product...</option>
-                      {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={warehouseProductSearch}
+                        onChange={(e) => setWarehouseProductSearch(e.target.value)}
+                        placeholder="Search by name or item code..."
+                        className="w-full pl-9 pr-3 py-2.5 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <select
+                        value={warehouseCategoryFilter}
+                        onChange={(e) => setWarehouseCategoryFilter(e.target.value)}
+                        className="w-36 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      >
+                        <option value="">All Categories</option>
+                        {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                      </select>
+                      <select
+                        name="productId"
+                        value={formData.productId || ''}
+                        onChange={(e) => {
+                          const prod = products.find(p => p.id === parseInt(e.target.value, 10));
+                          setFormData({ ...formData, productId: e.target.value, productName: prod ? prod.name : formData.productName, category: prod ? prod.category : formData.category });
+                        }}
+                        className="flex-1 border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                      >
+                        <option value="">Not linked to a tracked product...</option>
+                        {products
+                          .filter(p => !warehouseCategoryFilter || p.category === warehouseCategoryFilter)
+                          .filter(p => !warehouseProductSearch || p.name.toLowerCase().includes(warehouseProductSearch.toLowerCase()) || (p.productCode || '').toLowerCase().includes(warehouseProductSearch.toLowerCase()))
+                          .map(p => <option key={p.id} value={p.id}>{p.productCode ? `[${p.productCode}] ` : ''}{p.name} (Stock: {p.stock})</option>)}
+                      </select>
+                    </div>
                     <input required name="productName" defaultValue={formData.productName || ''} placeholder="Item Name" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input name="category" defaultValue={formData.category || ''} placeholder="Category (optional)" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
                     <input required name="qty" type="number" min="0" defaultValue={formData.qty ?? ''} placeholder="Quantity in Warehouse" onChange={handleInputChange} className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400" />
@@ -3142,12 +3266,32 @@ export default function App() {
             <div className="bg-[var(--bg-card)] rounded-2xl p-6 md:p-8 shadow-2xl border border-[var(--border-card)] transition-colors w-full max-w-[95vw] md:w-[420px]">
               <div className="flex justify-between items-center mb-5">
                 <h3 className="text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
-                  <Wallet className="w-5 h-5 text-blue-600" /> Add Previous Due
+                  <Wallet className="w-5 h-5 text-blue-600" /> Add External Due
                 </h3>
                 <button onClick={() => setShowPreviousDueModal(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
               </div>
+
+              <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setPreviousDueForm({ ...previousDueForm, type: 'customer' })}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold transition-colors ${previousDueForm.type !== 'vendor' ? 'bg-orange-500 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                >
+                  Customer Owes Me
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviousDueForm({ ...previousDueForm, type: 'vendor' })}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold transition-colors ${previousDueForm.type === 'vendor' ? 'bg-indigo-600 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                >
+                  I Owe a Supplier
+                </button>
+              </div>
+
               <p className="text-xs text-[var(--text-muted)] mb-4">
-                Records money a customer already owed you before you started using this app — no product sale needed, just the amount and who owes it.
+                {previousDueForm.type === 'vendor'
+                  ? "Records money you already owed a supplier before you started using this app — no purchase needed, just the amount and who it's owed to."
+                  : "Records money a customer already owed you before you started using this app — no product sale needed, just the amount and who owes it."}
               </p>
 
               <form onSubmit={handleSavePreviousDue} className="space-y-3">
@@ -3155,7 +3299,7 @@ export default function App() {
                   required
                   value={previousDueForm.customer}
                   onChange={(e) => setPreviousDueForm({ ...previousDueForm, customer: e.target.value })}
-                  placeholder="Customer Name"
+                  placeholder={previousDueForm.type === 'vendor' ? 'Supplier Name' : 'Customer Name'}
                   className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                 />
                 <input
@@ -3169,7 +3313,7 @@ export default function App() {
                   type="number" step="0.01" min="0.01"
                   value={previousDueForm.amount}
                   onChange={(e) => setPreviousDueForm({ ...previousDueForm, amount: e.target.value })}
-                  placeholder="Amount Owed (Tk)"
+                  placeholder={previousDueForm.type === 'vendor' ? 'Amount You Owe (Tk)' : 'Amount Owed (Tk)'}
                   className="w-full border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] p-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
                 />
                 <input
@@ -4423,21 +4567,57 @@ export default function App() {
         {/* REPORTS TAB */}
         {activeTab === 'Reports' && (
           <div className="space-y-6">
-            <h2 className="text-xl font-bold text-[var(--text-primary)]">Financial Reports</h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-xl font-bold text-[var(--text-primary)]">Financial Reports</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex bg-[var(--bg-hover)] border border-[var(--border-card)] rounded-xl p-1 text-xs font-bold">
+                  {[['7d', '7 Days'], ['30d', '30 Days'], ['thisMonth', 'This Month'], ['allTime', 'All Time'], ['custom', 'Custom']].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setReportRangePreset(key)}
+                      className={`px-3 py-2 rounded-lg transition-colors whitespace-nowrap ${reportRangePreset === key ? 'bg-orange-500 text-white shadow-sm' : 'text-[var(--text-secondary)]'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {reportRangePreset === 'custom' && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date" value={reportRangeCustomStart}
+                      onChange={(e) => setReportRangeCustomStart(e.target.value)}
+                      max={reportRangeCustomEnd}
+                      className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                    <span className="text-[var(--text-muted)] text-sm">to</span>
+                    <input
+                      type="date" value={reportRangeCustomEnd}
+                      onChange={(e) => setReportRangeCustomEnd(e.target.value)}
+                      min={reportRangeCustomStart}
+                      max={new Date().toISOString().split('T')[0]}
+                      className="border border-[var(--input-border)] bg-[var(--input-bg)] text-[var(--text-primary)] text-sm px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+            <p className="text-xs text-[var(--text-muted)] -mt-4">Showing <span className="font-semibold">{reportRangeLabel}</span>{reportRangeBounds.start && ` (${reportRangeBounds.start} to ${reportRangeBounds.end})`} — Inventory Assets is always your current stock value, not range-dependent.</p>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Cost of Goods Sold (COGS)</p>
-                <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {costOfGoodsSold.toLocaleString()}</p>
+                <p className="text-2xl font-bold text-[var(--text-primary)]">Tk {reportRangeCogs.toLocaleString()}</p>
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Total Sales Revenue</p>
-                <p className="text-2xl font-bold text-orange-600">Tk {totalSellAmount.toLocaleString()}</p>
+                <p className="text-2xl font-bold text-orange-600">Tk {reportRangeSellAmount.toLocaleString()}</p>
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Gross Profit (before expenses)</p>
-                <p className={`text-2xl font-bold flex items-center gap-2 ${netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {netProfit >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
-                  Tk {Math.abs(netProfit).toLocaleString()}
+                <p className={`text-2xl font-bold flex items-center gap-2 ${reportRangeGrossProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {reportRangeGrossProfit >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
+                  Tk {Math.abs(reportRangeGrossProfit).toLocaleString()}
                 </p>
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
@@ -4446,41 +4626,41 @@ export default function App() {
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Total Other Expenses</p>
-                <p className="text-2xl font-bold text-red-500">Tk {totalExpensesAllTime.toLocaleString()}</p>
+                <p className="text-2xl font-bold text-red-500">Tk {reportRangeExpensesTotal.toLocaleString()}</p>
               </div>
               <div className="bg-[var(--bg-card)] p-6 rounded-2xl border border-[var(--border-card)] shadow-sm transition-colors lg:col-span-2">
                 <p className="text-sm font-semibold text-[var(--text-muted)] mb-1">Net Profit (after expenses) — Your Real Take-Home</p>
-                <p className={`text-2xl font-bold flex items-center gap-2 ${netProfitAfterExpenses >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {netProfitAfterExpenses >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
-                  Tk {Math.abs(netProfitAfterExpenses).toLocaleString()}
+                <p className={`text-2xl font-bold flex items-center gap-2 ${reportRangeNetProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {reportRangeNetProfit >= 0 ? <TrendingUp className="w-6 h-6" /> : <TrendingDown className="w-6 h-6" />}
+                  Tk {Math.abs(reportRangeNetProfit).toLocaleString()}
                 </p>
               </div>
             </div>
 
-            {/* RETAIL VS WHOLESALE — same revenue/profit split as above, broken out by sale type */}
+            {/* RETAIL VS WHOLESALE — same revenue/profit split as above, broken out by sale type, same range */}
             <div className="bg-[var(--bg-card)] border border-[var(--border-card)] rounded-2xl p-6 shadow-sm transition-colors">
               <h3 className="text-lg font-extrabold text-[var(--text-primary)] mb-5">Retail vs. Wholesale</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="bg-orange-500/10 rounded-xl p-5">
-                  <p className="text-xs font-bold text-orange-700 uppercase tracking-wide mb-3">Retail — {retailSales.length} order{retailSales.length !== 1 ? 's' : ''}</p>
+                  <p className="text-xs font-bold text-orange-700 uppercase tracking-wide mb-3">Retail — {reportRangeRetailSales.length} order{reportRangeRetailSales.length !== 1 ? 's' : ''}</p>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-sm text-[var(--text-secondary)]">Revenue</span>
-                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {retailRevenue.toLocaleString()}</span>
+                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {reportRangeRetailRevenue.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-[var(--text-secondary)]">Profit</span>
-                    <span className={`text-sm font-bold ${retailProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {retailProfit.toLocaleString()}</span>
+                    <span className={`text-sm font-bold ${reportRangeRetailProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {reportRangeRetailProfit.toLocaleString()}</span>
                   </div>
                 </div>
                 <div className="bg-indigo-500/10 rounded-xl p-5">
-                  <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide mb-3">Wholesale — {wholesaleSales.length} order{wholesaleSales.length !== 1 ? 's' : ''}</p>
+                  <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide mb-3">Wholesale — {reportRangeWholesaleSales.length} order{reportRangeWholesaleSales.length !== 1 ? 's' : ''}</p>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-sm text-[var(--text-secondary)]">Revenue</span>
-                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {wholesaleRevenue.toLocaleString()}</span>
+                    <span className="text-sm font-bold text-[var(--text-primary)]">Tk {reportRangeWholesaleRevenue.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-[var(--text-secondary)]">Profit</span>
-                    <span className={`text-sm font-bold ${wholesaleProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {wholesaleProfit.toLocaleString()}</span>
+                    <span className={`text-sm font-bold ${reportRangeWholesaleProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Tk {reportRangeWholesaleProfit.toLocaleString()}</span>
                   </div>
                 </div>
               </div>
@@ -4543,7 +4723,7 @@ export default function App() {
               </div>
 
               <div className="flex items-center justify-between mb-3">
-                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide">Last 14 Days</p>
+                <p className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wide">Last 30 Days</p>
                 <button
                   type="button"
                   onClick={handleExportDailyReportCSV}
@@ -4552,9 +4732,9 @@ export default function App() {
                   <Download className="w-3.5 h-3.5" /> Export CSV
                 </button>
               </div>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
                 <table className="w-full text-left text-sm">
-                  <thead>
+                  <thead className="sticky top-0 bg-[var(--bg-card)]">
                     <tr className="border-b border-[var(--border-card)] text-[var(--text-muted)] font-bold text-xs">
                       <th className="pb-2 pr-4">DATE</th>
                       <th className="pb-2 pr-4">SALES PAID</th>
@@ -4565,7 +4745,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-card)]">
-                    {last14DaysStats.map(d => (
+                    {last30DaysStats.map(d => (
                       <tr
                         key={d.date}
                         onClick={() => setReportDate(d.date)}
